@@ -158,7 +158,7 @@ func main() {
 
 	// 创建一个背景矩形来控制最小大小，高度设置为显示2行（约80像素）
 	background := canvas.NewRectangle(color.Transparent)
-	background.SetMinSize(fyne.NewSize(600, 80))
+	background.SetMinSize(fyne.NewSize(400, 60))
 
 	// 使用容器来控制大小，确保状态区域至少有一定的高度
 	statusContainer := container.NewMax(
@@ -173,8 +173,6 @@ func main() {
 		statusArea.TextStyle = fyne.TextStyle{
 			Bold: true, // 设置为粗体
 		}
-		// 设置文本颜色为黑色
-		statusArea.TextColor = color.Black
 
 		newText := statusArea.Text + currentTime + " " + status + "\n"
 		statusArea.SetText(newText)
@@ -343,6 +341,6 @@ func main() {
 	myWindow.SetContent(content)
 
 	// 增加窗口的默认大小，使状态区域有足够的显示空间
-	myWindow.Resize(fyne.NewSize(800, 600))
+	myWindow.Resize(fyne.NewSize(400, 400))
 	myWindow.ShowAndRun()
 }
