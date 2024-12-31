@@ -15,6 +15,7 @@ import (
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 	"github.com/go-ldap/ldap/v3"
 )
@@ -101,6 +102,17 @@ func (client *LDAPClient) testUserAuth(testUser, testPassword, searchDN string) 
 	return true
 }
 
+type myTheme struct {
+	fyne.Theme
+}
+
+func (m myTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) color.Color {
+	if name == theme.ColorNameForeground {
+		return color.Black
+	}
+	return theme.DefaultTheme().Color(name, variant)
+}
+
 func main() {
 	// 尝试以下几种常见的中文字体文件名
 	// os.Setenv("FYNE_FONT", "C:\\Windows\\Fonts\\MSYH.TTC") // 微软雅黑 TTC 格式
@@ -110,6 +122,7 @@ func main() {
 	// os.Setenv("FYNE_FONT", "C:\\Windows\\Fonts\\SIMHEI.TTF") // 黑体
 
 	myApp := app.New()
+	myApp.Settings().SetTheme(&myTheme{theme.DefaultTheme()})
 	myWindow := myApp.NewWindow("LDAP Client")
 
 	// 创建输入框和标签
@@ -156,53 +169,63 @@ func main() {
 	// 创建一个更新状态的辅助函数
 	updateStatus := func(status string) {
 		currentTime := time.Now().Format("15:04:05")
+		// 使用 TextStyle 设置文本样式
+		statusArea.TextStyle = fyne.TextStyle{
+			Bold: true, // 设置为粗体
+		}
+		// 设置文本颜色为黑色
+		statusArea.TextColor = color.Black
+
 		newText := statusArea.Text + currentTime + " " + status + "\n"
 		statusArea.SetText(newText)
 		// 滚动到底部
 		statusArea.CursorRow = len(strings.Split(statusArea.Text, "\n")) - 1
 	}
 
-	// 创建测试按钮
 	pingButton := widget.NewButton("连接测试", func() {
 		host := hostEntry.Text
-		updateStatus("开始ping测试...")
-
-		// 使用 -n 4 参数进行4次ping测试
-		cmd := exec.Command("ping", "-n", "4", host)
-		output, err := cmd.CombinedOutput()
-		if err != nil {
-			updateStatus("服务器无法连接")
+		if host == "" {
+			updateStatus("请输入服务器地址")
 			return
 		}
 
-		// 解析输出获取平均延迟
-		outputStr := string(output)
-		var avgTime string
+		updateStatus("开始ping测试...")
 
-		// 查找包含 "平均 = " 的行（中文Windows）或 "Average = " 的行（英文Windows）
-		lines := strings.Split(outputStr, "\n")
-		for _, line := range lines {
+		go func() {
+			cmd := exec.Command("ping", "-n", "4", host)
+			output, err := cmd.CombinedOutput()
+			if err != nil {
+				updateStatus(fmt.Sprintf("ping测试失败: %v", err))
+				return
+			}
 
-			if strings.Contains(line, "平均 = ") {
-				parts := strings.Split(line, "平均 = ")
-				if len(parts) > 1 {
-					avgTime = strings.TrimSpace(parts[1])
-					break
-				}
-			} else if strings.Contains(line, "Average = ") {
-				parts := strings.Split(line, "Average = ")
-				if len(parts) > 1 {
-					avgTime = strings.TrimSpace(parts[1])
-					break
+			// 解析输出获取平均延迟
+			outputStr := string(output)
+			var avgTime string
+
+			lines := strings.Split(outputStr, "\n")
+			for _, line := range lines {
+				if strings.Contains(line, "平均 = ") {
+					parts := strings.Split(line, "平均 = ")
+					if len(parts) > 1 {
+						avgTime = strings.TrimSpace(parts[1])
+						break
+					}
+				} else if strings.Contains(line, "Average = ") {
+					parts := strings.Split(line, "Average = ")
+					if len(parts) > 1 {
+						avgTime = strings.TrimSpace(parts[1])
+						break
+					}
 				}
 			}
-		}
 
-		if avgTime != "" {
-			updateStatus(fmt.Sprintf("ping测试结束，服务器可以连接，平均延迟为%s", avgTime))
-		} else {
-			updateStatus("ping测试结束，服务器可以连接，但无法获取平均延迟")
-		}
+			if avgTime != "" {
+				updateStatus(fmt.Sprintf("ping测试结束，服务器可以连接，平均延迟为%s", avgTime))
+			} else {
+				updateStatus("ping测试结束，服务器可以连接，但无法获取平均延迟")
+			}
+		}()
 	})
 
 	portTestButton := widget.NewButton("端口测试", func() {
