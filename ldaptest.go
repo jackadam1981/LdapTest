@@ -7,8 +7,13 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
+	"image/color"
+
+	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/widget"
 	"github.com/go-ldap/ldap/v3"
@@ -97,73 +102,224 @@ func (client *LDAPClient) testUserAuth(testUser, testPassword, searchDN string) 
 }
 
 func main() {
-	// 只保留字体设置
-	os.Setenv("FYNE_FONT", "C:\\Windows\\Fonts\\SIMYOU.TTF")
+	// 尝试以下几种常见的中文字体文件名
+	// os.Setenv("FYNE_FONT", "C:\\Windows\\Fonts\\MSYH.TTC") // 微软雅黑 TTC 格式
+	// 或者尝试
+	// os.Setenv("FYNE_FONT", "C:\\Windows\\Fonts\\MSYH.TTF") // 微软雅黑 TTF 格式
+	os.Setenv("FYNE_FONT", "C:\\Windows\\Fonts\\SIMYOU.TTF") // 宋体
+	// os.Setenv("FYNE_FONT", "C:\\Windows\\Fonts\\SIMHEI.TTF") // 黑体
 
 	myApp := app.New()
 	myWindow := myApp.NewWindow("LDAP Client")
 
-	// 创建简单的输入框和标签
+	// 创建输入框和标签
 	hostEntry := widget.NewEntry()
 	hostEntry.SetText("ldap.example.com")
 	hostEntry.SetPlaceHolder("请输入LDAP服务器地址")
 
-	// 使用简单的状态标签
-	statusLabel := widget.NewLabel("")
+	portEntry := widget.NewEntry()
+	portEntry.SetPlaceHolder("请输入LDAP服务器端口")
 
-	// 简化 ping 测试按钮
+	userDNEntry := widget.NewEntry()
+	userDNEntry.SetPlaceHolder("请输入管理员DN")
+
+	passwordEntry := widget.NewPasswordEntry()
+	passwordEntry.SetPlaceHolder("请输入管理员密码")
+
+	// 在 passwordEntry 后添加搜索 DN 输入框
+	searchDNEntry := widget.NewEntry()
+	searchDNEntry.SetPlaceHolder("请输入搜索DN")
+	searchDNEntry.SetText("dc=example,dc=com") // 设置默认值
+
+	// 添加测试用户的输入框
+	testUserEntry := widget.NewEntry()
+	testUserEntry.SetPlaceHolder("请输入测试用户名")
+
+	testPasswordEntry := widget.NewPasswordEntry()
+	testPasswordEntry.SetPlaceHolder("请输入测试密码")
+
+	// 将 statusLabel 改为带滚动条的多行文本输入框
+	statusArea := widget.NewMultiLineEntry()
+	statusArea.Disable()                    // 设置为只读
+	statusArea.Wrapping = fyne.TextWrapWord // 启用自动换行
+
+	// 创建一个背景矩形来控制最小大小，高度设置为显示2行（约80像素）
+	background := canvas.NewRectangle(color.Transparent)
+	background.SetMinSize(fyne.NewSize(600, 80))
+
+	// 使用容器来控制大小，确保状态区域至少有一定的高度
+	statusContainer := container.NewMax(
+		background,
+		container.NewVScroll(statusArea),
+	)
+
+	// 创建一个更新状态的辅助函数
+	updateStatus := func(status string) {
+		currentTime := time.Now().Format("15:04:05")
+		newText := statusArea.Text + currentTime + " " + status + "\n"
+		statusArea.SetText(newText)
+		// 滚动到底部
+		statusArea.CursorRow = len(strings.Split(statusArea.Text, "\n")) - 1
+	}
+
+	// 创建测试按钮
 	pingButton := widget.NewButton("连接测试", func() {
 		host := hostEntry.Text
-		if host == "" {
-			statusLabel.SetText("请输入服务器地址")
+		updateStatus("开始ping测试...")
+
+		// 使用 -n 4 参数进行4次ping测试
+		cmd := exec.Command("ping", "-n", "4", host)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			updateStatus("服务器无法连接")
 			return
 		}
 
-		statusLabel.SetText("开始ping测试...")
+		// 解析输出获取平均延迟
+		outputStr := string(output)
+		var avgTime string
 
-		go func() {
-			cmd := exec.Command("ping", "-n", "4", host)
-			output, err := cmd.CombinedOutput()
-			if err != nil {
-				statusLabel.SetText(fmt.Sprintf("ping测试失败: %v", err))
-				return
-			}
+		// 查找包含 "平均 = " 的行（中文Windows）或 "Average = " 的行（英文Windows）
+		lines := strings.Split(outputStr, "\n")
+		for _, line := range lines {
 
-			outputStr := string(output)
-			var avgTime string
-
-			lines := strings.Split(outputStr, "\n")
-			for _, line := range lines {
-				if strings.Contains(line, "平均 = ") {
-					parts := strings.Split(line, "平均 = ")
-					if len(parts) > 1 {
-						avgTime = strings.TrimSpace(parts[1])
-						break
-					}
-				} else if strings.Contains(line, "Average = ") {
-					parts := strings.Split(line, "Average = ")
-					if len(parts) > 1 {
-						avgTime = strings.TrimSpace(parts[1])
-						break
-					}
+			if strings.Contains(line, "平均 = ") {
+				parts := strings.Split(line, "平均 = ")
+				if len(parts) > 1 {
+					avgTime = strings.TrimSpace(parts[1])
+					break
+				}
+			} else if strings.Contains(line, "Average = ") {
+				parts := strings.Split(line, "Average = ")
+				if len(parts) > 1 {
+					avgTime = strings.TrimSpace(parts[1])
+					break
 				}
 			}
+		}
 
-			if avgTime != "" {
-				statusLabel.SetText(fmt.Sprintf("ping测试结束，服务器可以连接，平均延迟为%s", avgTime))
-			} else {
-				statusLabel.SetText("ping测试结束，服务器可以连接，但无法获取平均延迟")
-			}
-		}()
+		if avgTime != "" {
+			updateStatus(fmt.Sprintf("ping测试结束，服务器可以连接，平均延迟为%s", avgTime))
+		} else {
+			updateStatus("ping测试结束，服务器可以连接，但无法获取平均延迟")
+		}
 	})
 
-	// 使用简单的垂直布局
-	content := container.NewVBox(
-		hostEntry,
-		pingButton,
-		statusLabel,
+	portTestButton := widget.NewButton("端口测试", func() {
+		host := hostEntry.Text
+		port := 389 // 默认端口
+		fmt.Sscanf(portEntry.Text, "%d", &port)
+		address := fmt.Sprintf("%s:%d", host, port)
+		conn, err := net.DialTimeout("tcp", address, time.Second*3)
+		if err != nil {
+			updateStatus("端口未开放")
+		} else {
+			conn.Close()
+			updateStatus("端口已开放")
+		}
+	})
+
+	adminTestButton := widget.NewButton("管理测试", func() {
+		client := LDAPClient{
+			host:     hostEntry.Text,
+			port:     389,
+			userDN:   userDNEntry.Text,
+			password: passwordEntry.Text,
+		}
+		if client.testLDAPService() {
+			updateStatus("LDAP管理员验证成功")
+		} else {
+			updateStatus("LDAP管理员验证失败")
+		}
+	})
+
+	// 修改 Form 布局
+	form := &widget.Form{
+		Items: []*widget.FormItem{
+			{Text: "服务器地址:", Widget: container.NewBorder(
+				nil, nil, nil, pingButton, // 上、下、左、右，按钮放在右边
+				hostEntry, // 中间的组件会自动扩展
+			)},
+			{Text: "服务器端口:", Widget: container.NewBorder(
+				nil, nil, nil, portTestButton,
+				portEntry,
+			)},
+			{Text: "Admin DN:", Widget: userDNEntry},
+			{Text: "Admin密码:", Widget: container.NewBorder(
+				nil, nil, nil, adminTestButton,
+				passwordEntry,
+			)},
+			{Text: "搜索DN:", Widget: searchDNEntry},
+			{Text: "测试用户:", Widget: testUserEntry},
+			{Text: "测试密码:", Widget: testPasswordEntry},
+		},
+	}
+
+	checkButton := widget.NewButton("测试 LDAP 连接", func() {
+		ldapHost := hostEntry.Text
+		ldapPort := 389 // 默认端口
+		fmt.Sscanf(portEntry.Text, "%d", &ldapPort)
+		adminUserDN := userDNEntry.Text
+		adminPassword := passwordEntry.Text
+
+		client := LDAPClient{
+			host:     ldapHost,
+			port:     ldapPort,
+			userDN:   adminUserDN,
+			password: adminPassword,
+		}
+
+		if client.isPortOpen() {
+			updateStatus("LDAP port is open")
+			if client.testLDAPService() {
+				updateStatus("LDAP service is running")
+			} else {
+				updateStatus("LDAP service verification failed")
+			}
+		} else {
+			updateStatus("LDAP port is closed")
+		}
+	})
+
+	testUserButton := widget.NewButton("测试用户验证", func() {
+		if testUserEntry.Text == "" || testPasswordEntry.Text == "" {
+			updateStatus("请输入测试用户名和密码")
+			return
+		}
+
+		client := LDAPClient{
+			host:     hostEntry.Text,
+			port:     389,
+			userDN:   userDNEntry.Text,
+			password: passwordEntry.Text,
+		}
+
+		// 使用搜索 DN 输入框的值
+		if client.testUserAuth(testUserEntry.Text, testPasswordEntry.Text, searchDNEntry.Text) {
+			updateStatus("测试用户验证成功")
+		} else {
+			updateStatus("测试用户验证失败")
+		}
+	})
+
+	// 修改窗口布局
+	content := container.NewBorder(
+		// 顶部固定内容
+		container.NewVBox(
+			widget.NewLabel("LDAP 服务测试"),
+			form,
+			container.NewHBox(checkButton, testUserButton),
+		),
+		nil, // 底部
+		nil, // 左侧
+		nil, // 右侧
+		// 中间自动填充的内容
+		statusContainer,
 	)
 
 	myWindow.SetContent(content)
+
+	// 增加窗口的默认大小，使状态区域有足够的显示空间
+	myWindow.Resize(fyne.NewSize(800, 600))
 	myWindow.ShowAndRun()
 }
