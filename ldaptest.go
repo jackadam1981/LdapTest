@@ -15,7 +15,7 @@ import (
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
-	"fyne.io/fyne/v2/theme"
+	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/widget"
 	"github.com/go-ldap/ldap/v3"
 )
@@ -102,17 +102,6 @@ func (client *LDAPClient) testUserAuth(testUser, testPassword, searchDN string) 
 	return true
 }
 
-type myTheme struct {
-	fyne.Theme
-}
-
-func (m myTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) color.Color {
-	if name == theme.ColorNameForeground {
-		return color.Black
-	}
-	return theme.DefaultTheme().Color(name, variant)
-}
-
 func main() {
 	// 尝试以下几种常见的中文字体文件名
 	// os.Setenv("FYNE_FONT", "C:\\Windows\\Fonts\\MSYH.TTC") // 微软雅黑 TTC 格式
@@ -122,7 +111,6 @@ func main() {
 	// os.Setenv("FYNE_FONT", "C:\\Windows\\Fonts\\SIMHEI.TTF") // 黑体
 
 	myApp := app.New()
-	myApp.Settings().SetTheme(&myTheme{theme.DefaultTheme()})
 	myWindow := myApp.NewWindow("LDAP Client")
 
 	// 创建输入框和标签
@@ -254,27 +242,43 @@ func main() {
 		}
 	})
 
-	// 修改 Form 布局
-	form := &widget.Form{
-		Items: []*widget.FormItem{
-			{Text: "服务器地址:", Widget: container.NewBorder(
-				nil, nil, nil, pingButton, // 上、下、左、右，按钮放在右边
-				hostEntry, // 中间的组件会自动扩展
-			)},
-			{Text: "服务器端口:", Widget: container.NewBorder(
-				nil, nil, nil, portTestButton,
-				portEntry,
-			)},
-			{Text: "Admin DN:", Widget: userDNEntry},
-			{Text: "Admin密码:", Widget: container.NewBorder(
-				nil, nil, nil, adminTestButton,
-				passwordEntry,
-			)},
-			{Text: "搜索DN:", Widget: searchDNEntry},
-			{Text: "测试用户:", Widget: testUserEntry},
-			{Text: "测试密码:", Widget: testPasswordEntry},
-		},
+	// 创建一个函数来生成统一宽度的标签
+	makeLabel := func(text string) fyne.CanvasObject {
+		label := widget.NewLabel(text)
+		label.TextStyle = fyne.TextStyle{Bold: true}
+		label.Alignment = fyne.TextAlignTrailing // 文字右对齐
+
+		// 创建一个固定宽度的容器来包装标签
+		return container.NewHBox(
+			layout.NewSpacer(), // 左侧弹性空间
+			container.NewGridWrap(fyne.NewSize(100, 0), label), // 固定宽度的标签容器
+		)
 	}
+
+	// 使用 Border 布局来实现自动拉伸
+	formContainer := container.NewVBox(
+		container.NewBorder(nil, nil, makeLabel("服务器地址:"), pingButton,
+			hostEntry,
+		),
+		container.NewBorder(nil, nil, makeLabel("服务器端口:"), portTestButton,
+			portEntry,
+		),
+		container.NewBorder(nil, nil, makeLabel("Admin DN:"), nil,
+			userDNEntry,
+		),
+		container.NewBorder(nil, nil, makeLabel("Admin密码:"), adminTestButton,
+			passwordEntry,
+		),
+		container.NewBorder(nil, nil, makeLabel("搜索DN:"), nil,
+			searchDNEntry,
+		),
+		container.NewBorder(nil, nil, makeLabel("测试用户:"), nil,
+			testUserEntry,
+		),
+		container.NewBorder(nil, nil, makeLabel("测试密码:"), nil,
+			testPasswordEntry,
+		),
+	)
 
 	checkButton := widget.NewButton("测试 LDAP 连接", func() {
 		ldapHost := hostEntry.Text
@@ -328,7 +332,7 @@ func main() {
 		// 顶部固定内容
 		container.NewVBox(
 			widget.NewLabel("LDAP 服务测试"),
-			form,
+			formContainer,
 			container.NewHBox(checkButton, testUserButton),
 		),
 		nil, // 底部
@@ -341,6 +345,6 @@ func main() {
 	myWindow.SetContent(content)
 
 	// 增加窗口的默认大小，使状态区域有足够的显示空间
-	myWindow.Resize(fyne.NewSize(400, 400))
+	myWindow.Resize(fyne.NewSize(400, 450))
 	myWindow.ShowAndRun()
 }
