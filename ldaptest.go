@@ -14,6 +14,7 @@ import (
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
@@ -306,28 +307,57 @@ func main() {
 	)
 
 	checkButton := widget.NewButton("测试 LDAP 连接", func() {
-		ldapHost := hostEntry.Text
-		ldapPort := 389 // 默认端口
-		fmt.Sscanf(portEntry.Text, "%d", &ldapPort)
-		adminUserDN := userDNEntry.Text
-		adminPassword := passwordEntry.Text
+		// 必填字段验证
+		host := hostEntry.Text
+		if host == "" {
+			dialog.ShowError(fmt.Errorf("服务器地址不能为空"), myWindow)
+			updateStatus("错误：请填写服务器地址")
+			return
+		}
+		if host == "ldap.example.com" {
+			dialog.ShowError(fmt.Errorf("请修改默认服务器地址"), myWindow)
+			updateStatus("错误：请填写实际服务器地址")
+			return
+		}
+		if portEntry.Text == "" {
+			dialog.ShowError(fmt.Errorf("服务器端口不能为空"), myWindow)
+			updateStatus("错误：请填写服务器端口")
+			return
+		}
+		if userDNEntry.Text == "" {
+			dialog.ShowError(fmt.Errorf("admin DN 不能为空"), myWindow)
+			updateStatus("错误：请填写dmin DN")
+			return
+		}
+		if passwordEntry.Text == "" {
+			dialog.ShowError(fmt.Errorf("Admin密码不能为空"), myWindow)
+			updateStatus("错误：请填写Admin密码")
+			return
+		}
+
+		ldapPort := 389
+		if _, err := fmt.Sscanf(portEntry.Text, "%d", &ldapPort); err != nil || ldapPort < 1 || ldapPort > 65535 {
+			dialog.ShowError(fmt.Errorf("无效端口号：%s（必须是1-65535）", portEntry.Text), myWindow)
+			updateStatus(fmt.Sprintf("错误：无效端口号 %s", portEntry.Text))
+			return
+		}
 
 		client := LDAPClient{
-			host:     ldapHost,
+			host:     hostEntry.Text,
 			port:     ldapPort,
-			userDN:   adminUserDN,
-			password: adminPassword,
+			userDN:   userDNEntry.Text,
+			password: passwordEntry.Text,
 		}
 
 		if client.isPortOpen() {
-			updateStatus("LDAP port is open")
+			updateStatus("LDAP 端口正常打开")
 			if client.testLDAPService() {
-				updateStatus("LDAP service is running")
+				updateStatus("LDAP 服务正常")
 			} else {
-				updateStatus("LDAP service verification failed")
+				updateStatus("LDAP 服务异常")
 			}
 		} else {
-			updateStatus("LDAP port is closed")
+			updateStatus("LDAP 端口未开放")
 		}
 	})
 
