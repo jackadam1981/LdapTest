@@ -18,6 +18,7 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 	"github.com/go-ldap/ldap/v3"
+	"golang.org/x/text/encoding/simplifiedchinese"
 )
 
 type LDAPClient struct {
@@ -205,8 +206,12 @@ func main() {
 				return
 			}
 
+			decoder := simplifiedchinese.GBK.NewDecoder()
+			utf8Output, _ := decoder.Bytes(output)
+			outputStr := string(utf8Output)
+
 			// 解析输出获取平均延迟
-			outputStr := string(output)
+			// outputStr := string(output)
 			var avgTime string
 
 			lines := strings.Split(outputStr, "\n")
