@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"image/color"
 	"log"
 	"net"
 	"os"
@@ -9,13 +10,12 @@ import (
 	"strings"
 	"time"
 
-	"image/color"
-
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/layout"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 	"github.com/go-ldap/ldap/v3"
 )
@@ -28,7 +28,7 @@ type LDAPClient struct {
 }
 
 func (client *LDAPClient) isPortOpen() bool {
-	address := fmt.Sprintf("%s:%d", client.host, client.port)
+	address := net.JoinHostPort(client.host, fmt.Sprintf("%d", client.port))
 	conn, err := net.Dial("tcp", address)
 	if err != nil {
 		return false
@@ -38,7 +38,8 @@ func (client *LDAPClient) isPortOpen() bool {
 }
 
 func (client *LDAPClient) testLDAPService() bool {
-	l, err := ldap.Dial("tcp", fmt.Sprintf("%s:%d", client.host, client.port))
+	url := fmt.Sprintf("ldap://%s:%d", client.host, client.port)
+	l, err := ldap.DialURL(url)
 	if err != nil {
 		log.Println("Failed to connect:", err)
 		return false
@@ -56,7 +57,8 @@ func (client *LDAPClient) testLDAPService() bool {
 }
 
 func (client *LDAPClient) testUserAuth(testUser, testPassword, searchDN string) bool {
-	l, err := ldap.Dial("tcp", fmt.Sprintf("%s:%d", client.host, client.port))
+	url := fmt.Sprintf("ldap://%s:%d", client.host, client.port)
+	l, err := ldap.DialURL(url)
 	if err != nil {
 		log.Println("Failed to connect:", err)
 		return false
@@ -102,15 +104,33 @@ func (client *LDAPClient) testUserAuth(testUser, testPassword, searchDN string) 
 	return true
 }
 
-func main() {
-	// 尝试以下几种常见的中文字体文件名
-	// os.Setenv("FYNE_FONT", "C:\\Windows\\Fonts\\MSYH.TTC") // 微软雅黑 TTC 格式
-	// 或者尝试
-	// os.Setenv("FYNE_FONT", "C:\\Windows\\Fonts\\MSYH.TTF") // 微软雅黑 TTF 格式
-	os.Setenv("FYNE_FONT", "C:\\Windows\\Fonts\\SIMYOU.TTF") // 宋体
-	// os.Setenv("FYNE_FONT", "C:\\Windows\\Fonts\\SIMHEI.TTF") // 黑体
+type myTheme struct {
+	fyne.Theme
+}
 
+func (m myTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) color.Color {
+	if name == theme.ColorNameDisabled {
+		return &color.NRGBA{R: 0, G: 0, B: 0, A: 255} // 纯黑色
+	}
+	return theme.DefaultTheme().Color(name, variant)
+}
+
+func (m myTheme) Font(style fyne.TextStyle) fyne.Resource {
+	return theme.DefaultTheme().Font(style)
+}
+
+func (m myTheme) Icon(name fyne.ThemeIconName) fyne.Resource {
+	return theme.DefaultTheme().Icon(name)
+}
+
+func (m myTheme) Size(name fyne.ThemeSizeName) float32 {
+	return theme.DefaultTheme().Size(name)
+}
+
+func main() {
+	os.Setenv("FYNE_FONT", "C:\\Windows\\Fonts\\SIMYOU.TTF")
 	myApp := app.New()
+	myApp.Settings().SetTheme(&myTheme{})
 	myWindow := myApp.NewWindow("LDAP Client")
 
 	// 创建输入框和标签
@@ -149,7 +169,7 @@ func main() {
 	background.SetMinSize(fyne.NewSize(400, 60))
 
 	// 使用容器来控制大小，确保状态区域至少有一定的高度
-	statusContainer := container.NewMax(
+	statusContainer := container.NewStack(
 		background,
 		container.NewVScroll(statusArea),
 	)
@@ -218,7 +238,7 @@ func main() {
 		host := hostEntry.Text
 		port := 389 // 默认端口
 		fmt.Sscanf(portEntry.Text, "%d", &port)
-		address := fmt.Sprintf("%s:%d", host, port)
+		address := net.JoinHostPort(host, fmt.Sprintf("%d", port))
 		conn, err := net.DialTimeout("tcp", address, time.Second*3)
 		if err != nil {
 			updateStatus("端口未开放")
