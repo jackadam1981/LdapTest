@@ -252,17 +252,24 @@ func main() {
 	})
 
 	// 端口测试按钮
+	// 修改端口测试按钮的回调函数
 	portTestButton := widget.NewButton("端口测试", func() {
 		host := hostEntry.Text
 		port := 389 // 默认端口
-		fmt.Sscanf(portEntry.Text, "%d", &port)
+		if portEntry.Text != "" {
+			if _, err := fmt.Sscanf(portEntry.Text, "%d", &port); err != nil {
+				updateStatus(fmt.Sprintf("错误：无效端口号 %s", portEntry.Text))
+				return
+			}
+		}
+
 		address := net.JoinHostPort(host, fmt.Sprintf("%d", port))
-		conn, err := net.DialTimeout("tcp", address, time.Second*3)
+		conn, err := net.DialTimeout("tcp", address, 3*time.Second)
 		if err != nil {
-			updateStatus("端口未开放")
+			updateStatus(fmt.Sprintf("端口 %d 未开放", port)) // 添加端口号
 		} else {
 			conn.Close()
-			updateStatus("端口已开放")
+			updateStatus(fmt.Sprintf("端口 %d 已开放", port)) // 添加端口号
 		}
 	})
 
