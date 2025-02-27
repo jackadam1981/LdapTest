@@ -149,11 +149,21 @@ func main() {
 	passwordEntry := widget.NewPasswordEntry()
 	passwordEntry.SetPlaceHolder("请输入管理员密码")
 
+	ldapDNEntry := widget.NewEntry()
+	ldapDNEntry.SetPlaceHolder("请输入管理员DN")
+
+	ldappasswordEntry := widget.NewPasswordEntry()
+	ldappasswordEntry.SetPlaceHolder("请输入管理员密码")
+
 	// 在 passwordEntry 后添加搜索 DN 输入框
 	searchDNEntry := widget.NewEntry()
 	searchDNEntry.SetPlaceHolder("请输入搜索DN")
 	searchDNEntry.SetText("dc=example,dc=com") // 设置默认值
 
+	// 在 passwordEntry 后添加搜索 DN 输入框
+	filterDNEntry := widget.NewEntry()
+	filterDNEntry.SetPlaceHolder("请输入过滤器")
+	filterDNEntry.SetText("(&(objectclass=user)(uid={%s}))") // 设置默认值
 	// 添加测试用户的输入框
 	testUserEntry := widget.NewEntry()
 	testUserEntry.SetPlaceHolder("请输入测试用户名")
@@ -190,6 +200,7 @@ func main() {
 		statusArea.CursorRow = len(strings.Split(statusArea.Text, "\n")) - 1
 	}
 
+	// ping测试按钮
 	pingButton := widget.NewButton("连接测试", func() {
 		host := hostEntry.Text
 		if host == "" {
@@ -240,6 +251,7 @@ func main() {
 		}()
 	})
 
+	// 端口测试按钮
 	portTestButton := widget.NewButton("端口测试", func() {
 		host := hostEntry.Text
 		port := 389 // 默认端口
@@ -254,59 +266,8 @@ func main() {
 		}
 	})
 
-	adminTestButton := widget.NewButton("管理测试", func() {
-		client := LDAPClient{
-			host:     hostEntry.Text,
-			port:     389,
-			userDN:   userDNEntry.Text,
-			password: passwordEntry.Text,
-		}
-		if client.testLDAPService() {
-			updateStatus("LDAP管理员验证成功")
-		} else {
-			updateStatus("LDAP管理员验证失败")
-		}
-	})
-
-	// 创建一个函数来生成统一宽度的标签
-	makeLabel := func(text string) fyne.CanvasObject {
-		label := widget.NewLabel(text)
-		label.TextStyle = fyne.TextStyle{Bold: true}
-		label.Alignment = fyne.TextAlignTrailing // 文字右对齐
-
-		// 创建一个固定宽度的容器来包装标签
-		return container.NewHBox(
-			layout.NewSpacer(), // 左侧弹性空间
-			container.NewGridWrap(fyne.NewSize(100, 0), label), // 固定宽度的标签容器
-		)
-	}
-
-	// 使用 Border 布局来实现自动拉伸
-	formContainer := container.NewVBox(
-		container.NewBorder(nil, nil, makeLabel("服务器地址:"), pingButton,
-			hostEntry,
-		),
-		container.NewBorder(nil, nil, makeLabel("服务器端口:"), portTestButton,
-			portEntry,
-		),
-		container.NewBorder(nil, nil, makeLabel("Admin DN:"), nil,
-			userDNEntry,
-		),
-		container.NewBorder(nil, nil, makeLabel("Admin密码:"), adminTestButton,
-			passwordEntry,
-		),
-		container.NewBorder(nil, nil, makeLabel("搜索DN:"), nil,
-			searchDNEntry,
-		),
-		container.NewBorder(nil, nil, makeLabel("测试用户:"), nil,
-			testUserEntry,
-		),
-		container.NewBorder(nil, nil, makeLabel("测试密码:"), nil,
-			testPasswordEntry,
-		),
-	)
-
-	checkButton := widget.NewButton("测试 LDAP 连接", func() {
+	// LDAP测试
+	adminTestButton := widget.NewButton("测试 LDAP 连接", func() {
 		// 必填字段验证
 		host := hostEntry.Text
 		if host == "" {
@@ -361,7 +322,27 @@ func main() {
 		}
 	})
 
-	testUserButton := widget.NewButton("测试用户验证", func() {
+	// 创建LDAP最小权限账号按钮
+	createLdapButton := widget.NewButton("创建LDAP账号", func() {
+		if ldapDNEntry.Text == "" || ldappasswordEntry.Text == "" {
+			updateStatus("请输入LDAP用户名和密码")
+			return
+		}
+		client := LDAPClient{
+			host:     hostEntry.Text,
+			port:     389,
+			userDN:   userDNEntry.Text,
+			password: passwordEntry.Text,
+		}
+		if client.testLDAPService() {
+			updateStatus("LDAP管理员验证成功")
+		} else {
+			updateStatus("LDAP管理员验证失败")
+		}
+	})
+
+	// 管理员测试验证
+	adminTestUserButton := widget.NewButton("admin账号验证用户", func() {
 		if testUserEntry.Text == "" || testPasswordEntry.Text == "" {
 			updateStatus("请输入测试用户名和密码")
 			return
@@ -382,13 +363,81 @@ func main() {
 		}
 	})
 
+	// LDAP测试验证
+	ldapTestUserButton := widget.NewButton("LDAP账号验证用户", func() {
+		if testUserEntry.Text == "" || testPasswordEntry.Text == "" {
+			updateStatus("请输入测试用户名和密码")
+			return
+		}
+
+		client := LDAPClient{
+			host:     hostEntry.Text,
+			port:     389,
+			userDN:   userDNEntry.Text,
+			password: passwordEntry.Text,
+		}
+
+		// 使用搜索 DN 输入框的值
+		if client.testUserAuth(testUserEntry.Text, testPasswordEntry.Text, searchDNEntry.Text) {
+			updateStatus("测试用户验证成功")
+		} else {
+			updateStatus("测试用户验证失败")
+		}
+	})
+
+	// 创建一个函数来生成统一宽度的标签
+	makeLabel := func(text string) fyne.CanvasObject {
+		label := widget.NewLabel(text)
+		label.TextStyle = fyne.TextStyle{Bold: true}
+		label.Alignment = fyne.TextAlignTrailing // 文字右对齐
+
+		// 创建一个固定宽度的容器来包装标签
+		return container.NewHBox(
+			layout.NewSpacer(), // 左侧弹性空间
+			container.NewGridWrap(fyne.NewSize(100, 0), label), // 固定宽度的标签容器
+		)
+	}
+
+	// 使用 Border 布局来实现自动拉伸
+	formContainer := container.NewVBox(
+		container.NewBorder(nil, nil, makeLabel("服务器地址:"), pingButton,
+			hostEntry,
+		),
+		container.NewBorder(nil, nil, makeLabel("服务器端口:"), portTestButton,
+			portEntry,
+		),
+		container.NewBorder(nil, nil, makeLabel("Admin DN:"), nil,
+			userDNEntry,
+		),
+		container.NewBorder(nil, nil, makeLabel("Admin密码:"), adminTestButton,
+			passwordEntry,
+		),
+		container.NewBorder(nil, nil, makeLabel("Ldap DN:"), nil,
+			ldapDNEntry,
+		),
+		container.NewBorder(nil, nil, makeLabel("Ldap密码:"), createLdapButton,
+			ldappasswordEntry,
+		),
+		container.NewBorder(nil, nil, makeLabel("搜索DN:"), nil,
+			searchDNEntry,
+		),
+		container.NewBorder(nil, nil, makeLabel("过滤器:"), nil,
+			filterDNEntry,
+		),
+		container.NewBorder(nil, nil, makeLabel("测试用户名:"), adminTestUserButton,
+			testUserEntry,
+		),
+		container.NewBorder(nil, nil, makeLabel("测试密码:"), ldapTestUserButton,
+			testPasswordEntry,
+		),
+	)
+
 	// 修改窗口布局
 	content := container.NewBorder(
 		// 顶部固定内容
 		container.NewVBox(
 			widget.NewLabel("LDAP 服务测试"),
 			formContainer,
-			container.NewHBox(checkButton, testUserButton),
 		),
 		nil, // 底部
 		nil, // 左侧
@@ -400,6 +449,6 @@ func main() {
 	myWindow.SetContent(content)
 
 	// 增加窗口的默认大小，使状态区域有足够的显示空间
-	myWindow.Resize(fyne.NewSize(400, 450))
+	myWindow.Resize(fyne.NewSize(600, 600))
 	myWindow.ShowAndRun()
 }
