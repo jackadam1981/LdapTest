@@ -137,11 +137,11 @@ func main() {
 
 	// 创建输入框和标签
 	hostEntry := widget.NewEntry()
-	hostEntry.SetText("ldap.example.com")
-	hostEntry.SetPlaceHolder("请输入LDAP服务器地址")
+	hostEntry.SetText("example.com")
+	hostEntry.SetPlaceHolder("请输入LDAP服务器地址，一般是根域名")
 
 	portEntry := widget.NewEntry()
-	portEntry.SetPlaceHolder("请输入LDAP服务器端口")
+	portEntry.SetPlaceHolder("请输入LDAP服务器端口，一般是389")
 
 	userDNEntry := widget.NewEntry()
 	userDNEntry.SetPlaceHolder("请输入管理员DN")
@@ -150,10 +150,10 @@ func main() {
 	passwordEntry.SetPlaceHolder("请输入管理员密码")
 
 	ldapDNEntry := widget.NewEntry()
-	ldapDNEntry.SetPlaceHolder("请输入管理员DN")
+	ldapDNEntry.SetPlaceHolder("请输入LDAP DN")
 
 	ldappasswordEntry := widget.NewPasswordEntry()
-	ldappasswordEntry.SetPlaceHolder("请输入管理员密码")
+	ldappasswordEntry.SetPlaceHolder("请输入LDAP密码")
 
 	// 在 passwordEntry 后添加搜索 DN 输入框
 	searchDNEntry := widget.NewEntry()
