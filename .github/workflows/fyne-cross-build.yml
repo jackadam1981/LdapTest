@@ -1,0 +1,89 @@
+name: Fyne Cross Build and Release
+
+on:
+  workflow_dispatch: # 允许手动触发工作流
+
+permissions:
+  contents: write # 允许创建发布和上传资产
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: 1.21
+
+    - name: Install fyne-cross
+      run: |
+        go install github.com/fyne-io/fyne-cross@latest
+
+    - name: Build for Windows
+      run: |
+        fyne-cross windows -arch amd64 -app-id com.example.hellofyne -name myapp.exe
+
+    - name: Extract Windows EXE
+      run: |
+        unzip fyne-cross/dist/windows-amd64/myapp.exe.zip -d fyne-cross/dist/windows-amd64/
+
+
+    - name: Build for Linux
+      run: |
+        fyne-cross linux -arch amd64 -output myapp-linux-amd64 -app-id com.example.hellofyne
+
+    - name: Upload binaries
+      uses: actions/upload-artifact@v4
+      with:
+        name: myapp-binaries
+        path: |
+          fyne-cross/dist/windows-amd64/myapp.exe
+          fyne-cross/dist/linux-amd64/*.tar.xz
+
+    - name: List built files
+      run: |
+        ls -R fyne-cross/dist/
+
+
+    - name: Verify artifacts
+      run: |
+          ls -l fyne-cross/dist/windows-amd64/myapp.exe
+          ls -l fyne-cross/dist/linux-amd64/*.tar.xz
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code (with tags)
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 0  # 拉取所有历史和标签
+
+    - name: Download binaries
+      uses: actions/download-artifact@v4
+      with:
+        name: myapp-binaries
+
+    - name: Create and push version tag
+      id: tag
+      run: |
+        TAG_NAME=$(date +'v%Y%m%d')
+        git config user.name "GitHub Actions"
+        git config user.email "actions@github.com"
+        git tag $TAG_NAME
+        git push origin $TAG_NAME
+        echo "tag=$TAG_NAME" >> $GITHUB_OUTPUT
+
+    - name: Publish Release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ steps.tag.outputs.tag }}
+        files: |
+          fyne-cross/dist/windows-amd64/myapp.exe
+          fyne-cross/dist/linux-amd64/*.tar.xz
+        generate_release_notes: true
+        token: ${{ secrets.WRITE_TOKEN }}  # 推荐使用默认令牌 

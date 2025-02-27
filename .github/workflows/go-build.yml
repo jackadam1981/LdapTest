@@ -1,0 +1,79 @@
+name: Go Build and Release
+
+on:
+  workflow_dispatch: # 允许手动触发工作流
+
+permissions:
+  contents: write # 允许创建发布和上传资产
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        goos: [linux, windows, darwin]
+        goarch: [amd64, arm64]
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v2
+      with:
+        platforms: all
+
+    - name: Install OpenGL dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libgl-dev libxcursor-dev libxi-dev libxinerama-dev libxrandr-dev libxxf86vm-dev xvfb
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: 1.21
+
+    - name: Build
+      run: |
+        mkdir -p build
+        VERSION=$(date +'%Y%m%d') # 使用当前日期作为版本号
+        CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -o build/myapp-${{ matrix.goos }}-${{ matrix.goarch }}-$VERSION
+
+    - name: Upload binaries
+      uses: actions/upload-artifact@v4
+      with:
+        name: myapp-binaries-${{ matrix.goos }}-${{ matrix.goarch }}
+        path: build/
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Download binaries
+      uses: actions/download-artifact@v4
+      with:
+        name: myapp-binaries-*
+
+    - name: Create Release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.WRITE_TOKEN }}
+      with:
+        tag_name: v${{ github.run_number }}
+        release_name: Release v${{ github.run_number }}
+        draft: false
+        prerelease: false
+
+    - name: Upload Release Assets
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.WRITE_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: build/
+        asset_name: myapp-binaries-${{ matrix.goos }}-${{ matrix.goarch }}.zip
+        asset_content_type: application/zip
