@@ -150,6 +150,26 @@ func (e *CustomDomainEntry) FocusLost() {
 	}
 }
 
+// CustomPortEntry is a custom widget that embeds widget.Entry
+type CustomPortEntry struct {
+	widget.Entry
+}
+
+// NewCustomPortEntry creates a new CustomPortEntry
+func NewCustomPortEntry() *CustomPortEntry {
+	entry := &CustomPortEntry{}
+	entry.ExtendBaseWidget(entry)
+	return entry
+}
+
+// FocusGained is called when the entry gains focus
+func (e *CustomPortEntry) FocusGained() {
+	e.Entry.FocusGained() // Call the embedded Entry's FocusGained
+	if e.Text == "" {
+		e.SetText("389")
+	}
+}
+
 func main() {
 	os.Setenv("FYNE_FONT", "C:\\Windows\\Fonts\\SIMYOU.TTF")
 	myApp := app.New()
@@ -159,7 +179,13 @@ func main() {
 	// Create input fields and labels
 	adminEntry := widget.NewEntry()
 	adminEntry.SetPlaceHolder("请输入管理员DN")
+	// 在 passwordEntry 后添加搜索 DN 输入框
+	searchDNEntry := widget.NewEntry()
+	searchDNEntry.SetPlaceHolder("请输入搜索DN")
+	searchDNEntry.SetText("dc=example,dc=com") // 设置默认值
 
+	ldapDNEntry := widget.NewEntry()
+	ldapDNEntry.SetPlaceHolder("请输入LDAP DN")
 	// Declare domainEntry before using it in the closure
 	var domainEntry *CustomDomainEntry
 	domainEntry = NewCustomDomainEntry(func() {
@@ -173,27 +199,23 @@ func main() {
 
 		// Automatically update adminEntry when domainEntry loses focus
 		adminEntry.SetText("cn=Administrator,cn=Users," + domainDN)
+		searchDNEntry.SetText(domainDN)
+		ldapDNEntry.SetText("cn=Administrator,cn=Ldap," + domainDN)
+
 	})
 
 	domainEntry.SetText("example.com")
 	domainEntry.SetPlaceHolder("请输入LDAP服务器地址，一般是根域名")
 
-	portEntry := widget.NewEntry()
+	// Create a new CustomPortEntry
+	portEntry := NewCustomPortEntry()
 	portEntry.SetPlaceHolder("请输入LDAP服务器端口，一般是389")
 
 	passwordEntry := widget.NewPasswordEntry()
 	passwordEntry.SetPlaceHolder("请输入管理员密码")
 
-	ldapDNEntry := widget.NewEntry()
-	ldapDNEntry.SetPlaceHolder("请输入LDAP DN")
-
 	ldappasswordEntry := widget.NewPasswordEntry()
 	ldappasswordEntry.SetPlaceHolder("请输入LDAP密码")
-
-	// 在 passwordEntry 后添加搜索 DN 输入框
-	searchDNEntry := widget.NewEntry()
-	searchDNEntry.SetPlaceHolder("请输入搜索DN")
-	searchDNEntry.SetText("dc=example,dc=com") // 设置默认值
 
 	// 在 passwordEntry 后添加搜索 DN 输入框
 	filterDNEntry := widget.NewEntry()
