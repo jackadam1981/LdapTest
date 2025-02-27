@@ -129,22 +129,57 @@ func (m myTheme) Size(name fyne.ThemeSizeName) float32 {
 	return theme.DefaultTheme().Size(name)
 }
 
+// CustomDomainEntry is a custom widget that embeds widget.Entry
+type CustomDomainEntry struct {
+	widget.Entry
+	onFocusLost func()
+}
+
+// NewCustomDomainEntry creates a new CustomDomainEntry
+func NewCustomDomainEntry(onFocusLost func()) *CustomDomainEntry {
+	entry := &CustomDomainEntry{onFocusLost: onFocusLost}
+	entry.ExtendBaseWidget(entry)
+	return entry
+}
+
+// FocusLost is called when the entry loses focus
+func (e *CustomDomainEntry) FocusLost() {
+	e.Entry.FocusLost() // Call the embedded Entry's FocusLost
+	if e.onFocusLost != nil {
+		e.onFocusLost()
+	}
+}
+
 func main() {
 	os.Setenv("FYNE_FONT", "C:\\Windows\\Fonts\\SIMYOU.TTF")
 	myApp := app.New()
 	myApp.Settings().SetTheme(&myTheme{})
 	myWindow := myApp.NewWindow("LDAP Client")
 
-	// 创建输入框和标签
-	hostEntry := widget.NewEntry()
-	hostEntry.SetText("example.com")
-	hostEntry.SetPlaceHolder("请输入LDAP服务器地址，一般是根域名")
+	// Create input fields and labels
+	adminEntry := widget.NewEntry()
+	adminEntry.SetPlaceHolder("请输入管理员DN")
+
+	// Declare domainEntry before using it in the closure
+	var domainEntry *CustomDomainEntry
+	domainEntry = NewCustomDomainEntry(func() {
+		// Convert domainEntry text to DN format
+		domainParts := strings.Split(domainEntry.Text, ".")
+		var dnParts []string
+		for _, part := range domainParts {
+			dnParts = append(dnParts, "dc="+part)
+		}
+		domainDN := strings.Join(dnParts, ",")
+
+		// Automatically update adminEntry when domainEntry loses focus
+		adminEntry.SetText("cn=Administrator,cn=Users," + domainDN)
+	})
+
+	domainEntry.SetText("example.com")
+	domainEntry.SetPlaceHolder("请输入LDAP服务器地址，一般是根域名")
 
 	portEntry := widget.NewEntry()
 	portEntry.SetPlaceHolder("请输入LDAP服务器端口，一般是389")
-
-	userDNEntry := widget.NewEntry()
-	userDNEntry.SetPlaceHolder("请输入管理员DN")
 
 	passwordEntry := widget.NewPasswordEntry()
 	passwordEntry.SetPlaceHolder("请输入管理员密码")
@@ -202,7 +237,7 @@ func main() {
 
 	// ping测试按钮
 	pingButton := widget.NewButton("连接测试", func() {
-		host := hostEntry.Text
+		host := domainEntry.Text
 		if host == "" {
 			updateStatus("请输入服务器地址")
 			return
@@ -254,7 +289,7 @@ func main() {
 	// 端口测试按钮
 	// 修改端口测试按钮的回调函数
 	portTestButton := widget.NewButton("端口测试", func() {
-		host := hostEntry.Text
+		host := domainEntry.Text
 		port := 389 // 默认端口
 		if portEntry.Text != "" {
 			if _, err := fmt.Sscanf(portEntry.Text, "%d", &port); err != nil {
@@ -276,7 +311,7 @@ func main() {
 	// LDAP测试
 	adminTestButton := widget.NewButton("测试 LDAP 连接", func() {
 		// 必填字段验证
-		host := hostEntry.Text
+		host := domainEntry.Text
 		if host == "" {
 			dialog.ShowError(fmt.Errorf("服务器地址不能为空"), myWindow)
 			updateStatus("错误：请填写服务器地址")
@@ -292,7 +327,7 @@ func main() {
 			updateStatus("错误：请填写服务器端口")
 			return
 		}
-		if userDNEntry.Text == "" {
+		if adminEntry.Text == "" {
 			dialog.ShowError(fmt.Errorf("admin DN 不能为空"), myWindow)
 			updateStatus("错误：请填写dmin DN")
 			return
@@ -311,9 +346,9 @@ func main() {
 		}
 
 		client := LDAPClient{
-			host:     hostEntry.Text,
+			host:     domainEntry.Text,
 			port:     ldapPort,
-			userDN:   userDNEntry.Text,
+			userDN:   adminEntry.Text,
 			password: passwordEntry.Text,
 		}
 
@@ -336,9 +371,9 @@ func main() {
 			return
 		}
 		client := LDAPClient{
-			host:     hostEntry.Text,
+			host:     domainEntry.Text,
 			port:     389,
-			userDN:   userDNEntry.Text,
+			userDN:   adminEntry.Text,
 			password: passwordEntry.Text,
 		}
 		if client.testLDAPService() {
@@ -356,9 +391,9 @@ func main() {
 		}
 
 		client := LDAPClient{
-			host:     hostEntry.Text,
+			host:     domainEntry.Text,
 			port:     389,
-			userDN:   userDNEntry.Text,
+			userDN:   adminEntry.Text,
 			password: passwordEntry.Text,
 		}
 
@@ -378,9 +413,9 @@ func main() {
 		}
 
 		client := LDAPClient{
-			host:     hostEntry.Text,
+			host:     domainEntry.Text,
 			port:     389,
-			userDN:   userDNEntry.Text,
+			userDN:   adminEntry.Text,
 			password: passwordEntry.Text,
 		}
 
@@ -408,13 +443,13 @@ func main() {
 	// 使用 Border 布局来实现自动拉伸
 	formContainer := container.NewVBox(
 		container.NewBorder(nil, nil, makeLabel("服务器地址:"), pingButton,
-			hostEntry,
+			domainEntry,
 		),
 		container.NewBorder(nil, nil, makeLabel("服务器端口:"), portTestButton,
 			portEntry,
 		),
 		container.NewBorder(nil, nil, makeLabel("Admin DN:"), nil,
-			userDNEntry,
+			adminEntry,
 		),
 		container.NewBorder(nil, nil, makeLabel("Admin密码:"), adminTestButton,
 			passwordEntry,
