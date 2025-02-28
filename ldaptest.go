@@ -25,242 +25,282 @@ import (
 	"golang.org/x/text/encoding/simplifiedchinese"
 )
 
+// LDAPClient 结构体定义LDAP客户端配置
 type LDAPClient struct {
-	host     string
-	port     int
-	userDN   string
-	password string
+	host         string // LDAP服务器地址（IP或域名）
+	port         int    // LDAP服务端口（默认389）
+	bindDN       string // 绑定用识别名（用于认证的Distinguished Name）
+	bindPassword string // 绑定用密码
 }
 
+// isPortOpen 检查LDAP服务端口是否开放
+// 返回值：bool - true表示端口开放，false表示关闭
 func (client *LDAPClient) isPortOpen() bool {
 	address := net.JoinHostPort(client.host, fmt.Sprintf("%d", client.port))
+	// 使用TCP协议尝试建立连接
 	conn, err := net.Dial("tcp", address)
 	if err != nil {
 		return false
 	}
-	conn.Close()
+	conn.Close() // 关闭测试连接
 	return true
 }
 
+// testLDAPService 测试LDAP服务连通性
+// 返回值：bool - true表示服务正常，false表示异常
 func (client *LDAPClient) testLDAPService() bool {
 	url := fmt.Sprintf("ldap://%s:%d", client.host, client.port)
+	// 建立LDAP连接
 	l, err := ldap.DialURL(url)
 	if err != nil {
-		log.Println("Failed to connect:", err)
+		log.Println("连接失败:", err)
 		return false
 	}
-	defer l.Close()
+	defer l.Close() // 确保连接关闭
 
-	err = l.Bind(client.userDN, client.password)
+	// 使用提供的凭证进行绑定验证
+	err = l.Bind(client.bindDN, client.bindPassword)
 	if err != nil {
-		log.Println("Failed to bind:", err)
+		log.Println("绑定失败:", err)
 		return false
 	}
 
-	log.Println("LDAP service verified successfully")
+	log.Println("LDAP服务验证成功")
 	return true
 }
 
+// testUserAuth 测试用户认证流程
+// 参数：
+//
+//	testUser - 要测试的用户名
+//	testPassword - 测试用户的密码
+//	searchDN - 用户搜索的基准DN
+//
+// 返回值：bool - true表示认证成功，false表示失败
 func (client *LDAPClient) testUserAuth(testUser, testPassword, searchDN string) bool {
+	// 建立LDAP连接（同上）
 	url := fmt.Sprintf("ldap://%s:%d", client.host, client.port)
 	l, err := ldap.DialURL(url)
 	if err != nil {
-		log.Println("Failed to connect:", err)
+		log.Println("连接失败:", err)
 		return false
 	}
 	defer l.Close()
 
-	// 先用管理员账号绑定
-	err = l.Bind(client.userDN, client.password)
-	if err != nil {
-		log.Println("Admin bind failed:", err)
+	// 使用管理员凭证进行绑定
+	if err := l.Bind(client.bindDN, client.bindPassword); err != nil {
+		log.Println("管理员绑定失败:", err)
 		return false
 	}
 
-	// 使用传入的搜索 DN
+	// 构建搜索请求
 	searchRequest := ldap.NewSearchRequest(
-		searchDN, // 使用输入框中的搜索 DN
-		ldap.ScopeWholeSubtree, ldap.NeverDerefAliases, 0, 0, false,
-		fmt.Sprintf("(uid=%s)", testUser),
-		[]string{"dn"},
+		searchDN,               // 搜索基准（例如：dc=example,dc=com）
+		ldap.ScopeWholeSubtree, // 搜索整个子树
+		ldap.NeverDerefAliases, // 不解除别名引用
+		0, 0, false,            // 无大小和时间限制
+		fmt.Sprintf("(uid=%s)", testUser), // 过滤条件（根据uid查找用户）
+		[]string{"dn"},                    // 返回属性（只需要识别名）
 		nil,
 	)
 
+	// 执行搜索
 	sr, err := l.Search(searchRequest)
 	if err != nil {
-		log.Println("Search failed:", err)
+		log.Println("搜索失败:", err)
 		return false
 	}
 
+	// 验证搜索结果数量
 	if len(sr.Entries) != 1 {
-		log.Println("User not found or too many entries returned")
+		log.Println("用户不存在或返回多个结果")
 		return false
 	}
 
-	// 使用找到的用户 DN 进行绑定测试
+	// 使用找到的用户DN进行绑定测试
 	userDN := sr.Entries[0].DN
-	err = l.Bind(userDN, testPassword)
-	if err != nil {
-		log.Println("Test user bind failed:", err)
+	if err := l.Bind(userDN, testPassword); err != nil {
+		log.Println("用户绑定失败:", err)
 		return false
 	}
 
-	log.Println("Test user authenticated successfully")
+	log.Println("用户认证成功")
 	return true
 }
 
+// myTheme 自定义主题结构体，继承fyne.Theme接口
 type myTheme struct {
 	fyne.Theme
 }
 
+// Color 自定义颜色方案
+// 参数：
+//
+//	name - 颜色名称（如禁用状态颜色）
+//	variant - 主题变体（亮色/暗色模式）
+//
+// 返回值：color.Color - 对应的颜色值
 func (m myTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) color.Color {
+	// 修改禁用状态文字颜色为纯黑色
 	if name == theme.ColorNameDisabled {
-		return &color.NRGBA{R: 0, G: 0, B: 0, A: 255} // 纯黑色
+		return &color.NRGBA{R: 0, G: 0, B: 0, A: 255} // RGBA(0,0,0,255)
 	}
+	// 其他颜色使用默认主题设置
 	return theme.DefaultTheme().Color(name, variant)
 }
 
+// Font 获取字体资源（保持默认）
 func (m myTheme) Font(style fyne.TextStyle) fyne.Resource {
 	return theme.DefaultTheme().Font(style)
 }
 
+// Icon 获取图标资源（保持默认）
 func (m myTheme) Icon(name fyne.ThemeIconName) fyne.Resource {
 	return theme.DefaultTheme().Icon(name)
 }
 
+// Size 获取尺寸设置（保持默认）
 func (m myTheme) Size(name fyne.ThemeSizeName) float32 {
 	return theme.DefaultTheme().Size(name)
 }
 
-// CustomDomainEntry is a custom widget that embeds widget.Entry
+// CustomDomainEntry 自定义域名输入框组件
+// 继承自widget.Entry，添加焦点丢失回调功能
 type CustomDomainEntry struct {
 	widget.Entry
-	onFocusLost func()
+	onFocusLost func() // 焦点丢失时的回调函数
 }
 
-// NewCustomDomainEntry creates a new CustomDomainEntry
+// NewCustomDomainEntry 构造函数
+// 参数：onFocusLost - 焦点丢失时的回调函数
 func NewCustomDomainEntry(onFocusLost func()) *CustomDomainEntry {
 	entry := &CustomDomainEntry{onFocusLost: onFocusLost}
-	entry.ExtendBaseWidget(entry)
+	entry.ExtendBaseWidget(entry) // 必须调用以实现自定义组件
 	return entry
 }
 
-// FocusLost is called when the entry loses focus
+// FocusLost 重写焦点丢失事件处理
 func (e *CustomDomainEntry) FocusLost() {
-	e.Entry.FocusLost() // Call the embedded Entry's FocusLost
+	e.Entry.FocusLost() // 调用基类方法
 	if e.onFocusLost != nil {
-		e.onFocusLost()
+		e.onFocusLost() // 执行自定义回调
 	}
 }
 
-// CustomPortEntry is a custom widget that embeds widget.Entry
+// CustomPortEntry 自定义端口输入框组件
+// 继承自widget.Entry，添加获取焦点时自动填充默认值功能
 type CustomPortEntry struct {
 	widget.Entry
 }
 
-// NewCustomPortEntry creates a new CustomPortEntry
+// NewCustomPortEntry 构造函数
 func NewCustomPortEntry() *CustomPortEntry {
 	entry := &CustomPortEntry{}
-	entry.ExtendBaseWidget(entry)
+	entry.ExtendBaseWidget(entry) // 必须调用以实现自定义组件
 	return entry
 }
 
-// FocusGained is called when the entry gains focus
+// FocusGained 重写获取焦点事件处理
 func (e *CustomPortEntry) FocusGained() {
-	e.Entry.FocusGained() // Call the embedded Entry's FocusGained
+	e.Entry.FocusGained() // 调用基类方法
 	if e.Text == "" {
-		e.SetText("389")
+		e.SetText("389") // 保持默认提示值，但实际使用时会解析输入值
 	}
 }
 
 func main() {
+	// 设置中文字体路径（仅Windows系统）
 	os.Setenv("FYNE_FONT", "C:\\Windows\\Fonts\\SIMYOU.TTF")
+
+	// 创建应用程序实例
 	myApp := app.New()
+	// 应用自定义主题
 	myApp.Settings().SetTheme(&myTheme{})
+	// 创建主窗口
 	myWindow := myApp.NewWindow("LDAP Client")
 
-	// Create input fields and labels
+	// 创建管理员DN输入框
 	adminEntry := widget.NewEntry()
 	adminEntry.SetPlaceHolder("请输入管理员DN")
-	// 在 passwordEntry 后添加搜索 DN 输入框
+
+	// 创建搜索DN输入框（用于用户搜索的基准DN）
 	searchDNEntry := widget.NewEntry()
 	searchDNEntry.SetPlaceHolder("请输入搜索DN")
-	searchDNEntry.SetText("dc=example,dc=com") // 设置默认值
+	searchDNEntry.SetText("CN=Users,DC=example,DC=com") // 默认示例值
 
+	// 创建LDAP DN输入框（用于创建LDAP账号）
 	ldapDNEntry := widget.NewEntry()
 	ldapDNEntry.SetPlaceHolder("请输入LDAP DN")
-	// Declare domainEntry before using it in the closure
+
+	// 创建自定义域名输入框（带自动生成DN功能）
 	var domainEntry *CustomDomainEntry
 	domainEntry = NewCustomDomainEntry(func() {
-		// Convert domainEntry text to DN format
+		// 将域名转换为DN格式（例如：example.com -> dc=example,dc=com）
 		domainParts := strings.Split(domainEntry.Text, ".")
 		var dnParts []string
 		for _, part := range domainParts {
-			dnParts = append(dnParts, "dc="+part)
+			dnParts = append(dnParts, "DC="+part)
 		}
 		domainDN := strings.Join(dnParts, ",")
 
-		// Automatically update adminEntry when domainEntry loses focus
-		adminEntry.SetText("cn=Administrator,cn=Users," + domainDN)
+		// 自动生成管理员DN和搜索DN
+		adminEntry.SetText("CN=Administrator,CN=Users," + domainDN)
 		searchDNEntry.SetText(domainDN)
-		ldapDNEntry.SetText("cn=Administrator,cn=Ldap," + domainDN)
-
+		ldapDNEntry.SetText("CN=ldap,CN=Ldap," + domainDN)
 	})
 
+	// 设置默认域名和提示文本
 	domainEntry.SetText("example.com")
 	domainEntry.SetPlaceHolder("请输入LDAP服务器地址，一般是根域名")
 
-	// Create a new CustomPortEntry
+	// 创建自定义端口输入框（聚焦时自动填充默认值）
 	portEntry := NewCustomPortEntry()
 	portEntry.SetPlaceHolder("请输入LDAP服务器端口，一般是389")
 
+	// 创建密码输入框
 	passwordEntry := widget.NewPasswordEntry()
 	passwordEntry.SetPlaceHolder("请输入管理员密码")
 
+	// 创建LDAP密码输入框
 	ldappasswordEntry := widget.NewPasswordEntry()
 	ldappasswordEntry.SetPlaceHolder("请输入LDAP密码")
 
-	// 在 passwordEntry 后添加搜索 DN 输入框
+	// 创建过滤器输入框（用于用户搜索的过滤条件）
 	filterDNEntry := widget.NewEntry()
 	filterDNEntry.SetPlaceHolder("请输入过滤器")
-	filterDNEntry.SetText("(&(objectclass=user)(uid={%s}))") // 设置默认值
-	// 添加测试用户的输入框
+	filterDNEntry.SetText("(&(objectclass=user)(uid={%s}))") // 默认过滤器模板
+
+	// 创建测试用户输入框
 	testUserEntry := widget.NewEntry()
 	testUserEntry.SetPlaceHolder("请输入测试用户名")
 
+	// 创建测试密码输入框
 	testPasswordEntry := widget.NewPasswordEntry()
 	testPasswordEntry.SetPlaceHolder("请输入测试密码")
 
-	// 将 statusLabel 改为带滚动条的多行文本输入框
+	// 创建带滚动条的状态显示区域
 	statusArea := widget.NewMultiLineEntry()
-	statusArea.Disable()                    // 设置为只读
+	statusArea.Disable()                    // 设置为只读模式
 	statusArea.Wrapping = fyne.TextWrapWord // 启用自动换行
 
-	// 创建一个背景矩形来控制最小大小，高度设置为显示2行（约80像素）
+	// 状态区域布局容器（确保最小显示高度）
 	background := canvas.NewRectangle(color.Transparent)
-	background.SetMinSize(fyne.NewSize(400, 60))
-
-	// 使用容器来控制大小，确保状态区域至少有一定的高度
+	background.SetMinSize(fyne.NewSize(400, 60)) // 最小尺寸约束
 	statusContainer := container.NewStack(
 		background,
-		container.NewVScroll(statusArea),
+		container.NewVScroll(statusArea), // 垂直滚动容器
 	)
 
-	// 创建一个更新状态的辅助函数
+	// 状态更新函数（带时间戳和自动滚动功能）
 	updateStatus := func(status string) {
-		currentTime := time.Now().Format("15:04:05")
-		// 使用 TextStyle 设置文本样式
-		statusArea.TextStyle = fyne.TextStyle{
-			Bold: true, // 设置为粗体
-		}
-
+		currentTime := time.Now().Format("15:04:05")      // 获取当前时间
+		statusArea.TextStyle = fyne.TextStyle{Bold: true} // 设置粗体显示
 		newText := statusArea.Text + currentTime + " " + status + "\n"
 		statusArea.SetText(newText)
-		// 滚动到底部
-		statusArea.CursorRow = len(strings.Split(statusArea.Text, "\n")) - 1
+		statusArea.CursorRow = len(strings.Split(statusArea.Text, "\n")) - 1 // 自动滚动到底部
 	}
 
-	// ping测试按钮
+	// ping测试按钮回调函数
 	pingButton := widget.NewButton("连接测试", func() {
 		host := domainEntry.Text
 		if host == "" {
@@ -269,8 +309,9 @@ func main() {
 		}
 
 		updateStatus("开始ping测试...")
-
+		// 使用goroutine避免阻塞UI线程
 		go func() {
+			// 执行ping命令（Windows参数为-n，Linux/macOS为-c）
 			cmd := exec.Command("ping", "-n", "4", host)
 			output, err := cmd.CombinedOutput()
 			if err != nil {
@@ -278,24 +319,25 @@ func main() {
 				return
 			}
 
+			// 转换中文编码（处理Windows下的GBK编码输出）
 			decoder := simplifiedchinese.GBK.NewDecoder()
 			utf8Output, _ := decoder.Bytes(output)
 			outputStr := string(utf8Output)
 
-			// 解析输出获取平均延迟
-			// outputStr := string(output)
+			// 解析ping结果获取平均延迟
 			var avgTime string
-
 			lines := strings.Split(outputStr, "\n")
 			for _, line := range lines {
-				if strings.Contains(line, "平均 = ") {
-					parts := strings.Split(line, "平均 = ")
-					if len(parts) > 1 {
-						avgTime = strings.TrimSpace(parts[1])
-						break
+				// 匹配中文和英文版本的延迟信息
+				if strings.Contains(line, "平均 = ") || strings.Contains(line, "Average = ") {
+					separator := " = "
+					if strings.Contains(line, "平均 = ") {
+						separator = "平均 = "
+					} else {
+						separator = "Average = "
 					}
-				} else if strings.Contains(line, "Average = ") {
-					parts := strings.Split(line, "Average = ")
+
+					parts := strings.Split(line, separator)
 					if len(parts) > 1 {
 						avgTime = strings.TrimSpace(parts[1])
 						break
@@ -303,6 +345,7 @@ func main() {
 				}
 			}
 
+			// 更新状态显示
 			if avgTime != "" {
 				updateStatus(fmt.Sprintf("ping测试结束，服务器可以连接，平均延迟为%s", avgTime))
 			} else {
@@ -311,38 +354,39 @@ func main() {
 		}()
 	})
 
-	// 端口测试按钮
-	// 修改端口测试按钮的回调函数
+	// 端口测试按钮回调函数
 	portTestButton := widget.NewButton("端口测试", func() {
 		host := domainEntry.Text
-		port := 389 // 默认端口
+		port := 389 // 默认端口（仅在输入为空时使用）
 		if portEntry.Text != "" {
+			// 解析用户输入的端口号
 			if _, err := fmt.Sscanf(portEntry.Text, "%d", &port); err != nil {
 				updateStatus(fmt.Sprintf("错误：无效端口号 %s", portEntry.Text))
 				return
 			}
 		}
 
+		// 使用3秒超时进行TCP连接测试
 		address := net.JoinHostPort(host, fmt.Sprintf("%d", port))
 		conn, err := net.DialTimeout("tcp", address, 3*time.Second)
 		if err != nil {
-			updateStatus(fmt.Sprintf("端口 %d 未开放", port)) // 添加端口号
+			updateStatus(fmt.Sprintf("端口 %d 未开放", port))
 		} else {
 			conn.Close()
-			updateStatus(fmt.Sprintf("端口 %d 已开放", port)) // 添加端口号
+			updateStatus(fmt.Sprintf("端口 %d 已开放", port))
 		}
 	})
 
-	// LDAP测试
+	// LDAP连接测试按钮回调函数
 	adminTestButton := widget.NewButton("测试 LDAP 连接", func() {
-		// 必填字段验证
+		// 输入验证
 		host := domainEntry.Text
 		if host == "" {
 			dialog.ShowError(fmt.Errorf("服务器地址不能为空"), myWindow)
 			updateStatus("错误：请填写服务器地址")
 			return
 		}
-		if host == "ldap.example.com" {
+		if host == "ldap.example.com" { // 防止使用示例地址
 			dialog.ShowError(fmt.Errorf("请修改默认服务器地址"), myWindow)
 			updateStatus("错误：请填写实际服务器地址")
 			return
@@ -354,7 +398,7 @@ func main() {
 		}
 		if adminEntry.Text == "" {
 			dialog.ShowError(fmt.Errorf("admin DN 不能为空"), myWindow)
-			updateStatus("错误：请填写dmin DN")
+			updateStatus("错误：请填写admin DN")
 			return
 		}
 		if passwordEntry.Text == "" {
@@ -363,20 +407,23 @@ func main() {
 			return
 		}
 
-		ldapPort := 389
+		// 解析端口号
+		var ldapPort int
 		if _, err := fmt.Sscanf(portEntry.Text, "%d", &ldapPort); err != nil || ldapPort < 1 || ldapPort > 65535 {
 			dialog.ShowError(fmt.Errorf("无效端口号：%s（必须是1-65535）", portEntry.Text), myWindow)
 			updateStatus(fmt.Sprintf("错误：无效端口号 %s", portEntry.Text))
 			return
 		}
 
+		// 创建LDAP客户端实例
 		client := LDAPClient{
-			host:     domainEntry.Text,
-			port:     ldapPort,
-			userDN:   adminEntry.Text,
-			password: passwordEntry.Text,
+			host:         domainEntry.Text,
+			port:         ldapPort,
+			bindDN:       adminEntry.Text,
+			bindPassword: passwordEntry.Text,
 		}
 
+		// 分步骤测试
 		if client.isPortOpen() {
 			updateStatus("LDAP 端口正常打开")
 			if client.testLDAPService() {
@@ -389,40 +436,66 @@ func main() {
 		}
 	})
 
-	// 创建LDAP最小权限账号按钮
+	// 创建LDAP账号按钮回调函数
 	createLdapButton := widget.NewButton("创建LDAP账号", func() {
+		// 输入验证
 		if ldapDNEntry.Text == "" || ldappasswordEntry.Text == "" {
 			updateStatus("请输入LDAP用户名和密码")
 			return
 		}
-		client := LDAPClient{
-			host:     domainEntry.Text,
-			port:     389,
-			userDN:   adminEntry.Text,
-			password: passwordEntry.Text,
+
+		// 解析端口号
+		port := 389
+		if portEntry.Text != "" {
+			if _, err := fmt.Sscanf(portEntry.Text, "%d", &port); err != nil {
+				dialog.ShowError(fmt.Errorf("无效端口号"), myWindow)
+				return
+			}
 		}
+
+		// 创建LDAP客户端实例（使用管理员凭证）
+		client := LDAPClient{
+			host:         domainEntry.Text,
+			port:         port,
+			bindDN:       adminEntry.Text,
+			bindPassword: passwordEntry.Text,
+		}
+
+		// 测试管理员凭证有效性
 		if client.testLDAPService() {
 			updateStatus("LDAP管理员验证成功")
+			// TODO: 实际创建LDAP账号的逻辑需要补充
 		} else {
 			updateStatus("LDAP管理员验证失败")
 		}
 	})
 
-	// 管理员测试验证
+	// 管理员验证用户按钮回调函数
 	adminTestUserButton := widget.NewButton("admin账号验证用户", func() {
+		// 输入验证
 		if testUserEntry.Text == "" || testPasswordEntry.Text == "" {
 			updateStatus("请输入测试用户名和密码")
 			return
 		}
 
-		client := LDAPClient{
-			host:     domainEntry.Text,
-			port:     389,
-			userDN:   adminEntry.Text,
-			password: passwordEntry.Text,
+		// 解析端口号
+		port := 389
+		if portEntry.Text != "" {
+			if _, err := fmt.Sscanf(portEntry.Text, "%d", &port); err != nil {
+				dialog.ShowError(fmt.Errorf("无效端口号"), myWindow)
+				return
+			}
 		}
 
-		// 使用搜索 DN 输入框的值
+		// 创建LDAP客户端实例
+		client := LDAPClient{
+			host:         domainEntry.Text,
+			port:         port,
+			bindDN:       adminEntry.Text,
+			bindPassword: passwordEntry.Text,
+		}
+
+		// 执行用户认证测试
 		if client.testUserAuth(testUserEntry.Text, testPasswordEntry.Text, searchDNEntry.Text) {
 			updateStatus("测试用户验证成功")
 		} else {
@@ -430,21 +503,32 @@ func main() {
 		}
 	})
 
-	// LDAP测试验证
+	// LDAP账号验证用户按钮回调函数
 	ldapTestUserButton := widget.NewButton("LDAP账号验证用户", func() {
+		// 输入验证（与管理员验证类似）
 		if testUserEntry.Text == "" || testPasswordEntry.Text == "" {
 			updateStatus("请输入测试用户名和密码")
 			return
 		}
 
-		client := LDAPClient{
-			host:     domainEntry.Text,
-			port:     389,
-			userDN:   adminEntry.Text,
-			password: passwordEntry.Text,
+		// 解析端口号
+		port := 389
+		if portEntry.Text != "" {
+			if _, err := fmt.Sscanf(portEntry.Text, "%d", &port); err != nil {
+				dialog.ShowError(fmt.Errorf("无效端口号"), myWindow)
+				return
+			}
 		}
 
-		// 使用搜索 DN 输入框的值
+		// 创建LDAP客户端实例（使用LDAP账号凭证）
+		client := LDAPClient{
+			host:         domainEntry.Text,
+			port:         port,
+			bindDN:       ldapDNEntry.Text,
+			bindPassword: ldappasswordEntry.Text,
+		}
+
+		// 执行用户认证测试
 		if client.testUserAuth(testUserEntry.Text, testPasswordEntry.Text, searchDNEntry.Text) {
 			updateStatus("测试用户验证成功")
 		} else {
@@ -455,13 +539,16 @@ func main() {
 	// 创建一个函数来生成统一宽度的标签
 	makeLabel := func(text string) fyne.CanvasObject {
 		label := widget.NewLabel(text)
-		label.TextStyle = fyne.TextStyle{Bold: true}
-		label.Alignment = fyne.TextAlignTrailing // 文字右对齐
+		label.TextStyle = fyne.TextStyle{Bold: true} // 粗体显示
+		label.Alignment = fyne.TextAlignTrailing     // 右对齐
 
-		// 创建一个固定宽度的容器来包装标签
+		// 使用容器实现固定宽度布局
 		return container.NewHBox(
 			layout.NewSpacer(), // 左侧弹性空间
-			container.NewGridWrap(fyne.NewSize(100, 0), label), // 固定宽度的标签容器
+			container.NewGridWrap( // 固定宽度容器
+				fyne.NewSize(100, 0), // 宽度100像素，高度自适应
+				label,
+			),
 		)
 	}
 
