@@ -25,6 +25,86 @@ import (
 	"golang.org/x/text/encoding/simplifiedchinese"
 )
 
+// myTheme 自定义主题结构体，继承fyne.Theme接口
+type myTheme struct {
+	fyne.Theme
+}
+
+// Color 自定义颜色方案
+// 参数：
+//
+//	name - 颜色名称（如禁用状态颜色）
+//	variant - 主题变体（亮色/暗色模式）
+//
+// 返回值：color.Color - 对应的颜色值
+func (m myTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) color.Color {
+	// 修改禁用状态文字颜色为纯黑色
+	if name == theme.ColorNameDisabled {
+		return &color.NRGBA{R: 0, G: 0, B: 0, A: 255} // RGBA(0,0,0,255)
+	}
+	// 其他颜色使用默认主题设置
+	return theme.DefaultTheme().Color(name, variant)
+}
+
+// Font 获取字体资源（保持默认）
+func (m myTheme) Font(style fyne.TextStyle) fyne.Resource {
+	return theme.DefaultTheme().Font(style)
+}
+
+// Icon 获取图标资源（保持默认）
+func (m myTheme) Icon(name fyne.ThemeIconName) fyne.Resource {
+	return theme.DefaultTheme().Icon(name)
+}
+
+// Size 获取尺寸设置（保持默认）
+func (m myTheme) Size(name fyne.ThemeSizeName) float32 {
+	return theme.DefaultTheme().Size(name)
+}
+
+// CustomDomainEntry 自定义域名输入框组件
+// 继承自widget.Entry，添加焦点丢失回调功能
+type CustomDomainEntry struct {
+	widget.Entry
+	onFocusLost func() // 焦点丢失时的回调函数
+}
+
+// NewCustomDomainEntry 构造函数
+// 参数：onFocusLost - 焦点丢失时的回调函数
+func NewCustomDomainEntry(onFocusLost func()) *CustomDomainEntry {
+	entry := &CustomDomainEntry{onFocusLost: onFocusLost}
+	entry.ExtendBaseWidget(entry) // 必须调用以实现自定义组件
+	return entry
+}
+
+// FocusLost 重写焦点丢失事件处理
+func (e *CustomDomainEntry) FocusLost() {
+	e.Entry.FocusLost() // 调用基类方法
+	if e.onFocusLost != nil {
+		e.onFocusLost() // 执行自定义回调
+	}
+}
+
+// CustomPortEntry 自定义端口输入框组件
+// 继承自widget.Entry，添加获取焦点时自动填充默认值功能
+type CustomPortEntry struct {
+	widget.Entry
+}
+
+// NewCustomPortEntry 构造函数
+func NewCustomPortEntry() *CustomPortEntry {
+	entry := &CustomPortEntry{}
+	entry.ExtendBaseWidget(entry) // 必须调用以实现自定义组件
+	return entry
+}
+
+// FocusGained 重写获取焦点事件处理
+func (e *CustomPortEntry) FocusGained() {
+	e.Entry.FocusGained() // 调用基类方法
+	if e.Text == "" {
+		e.SetText("389") // 保持默认提示值，但实际使用时会解析输入值
+	}
+}
+
 // LDAPClient 结构体定义LDAP客户端配置
 type LDAPClient struct {
 	host         string // LDAP服务器地址（IP或域名）
@@ -126,86 +206,6 @@ func (client *LDAPClient) testUserAuth(testUser, testPassword, searchDN string) 
 
 	log.Println("用户认证成功")
 	return true
-}
-
-// myTheme 自定义主题结构体，继承fyne.Theme接口
-type myTheme struct {
-	fyne.Theme
-}
-
-// Color 自定义颜色方案
-// 参数：
-//
-//	name - 颜色名称（如禁用状态颜色）
-//	variant - 主题变体（亮色/暗色模式）
-//
-// 返回值：color.Color - 对应的颜色值
-func (m myTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) color.Color {
-	// 修改禁用状态文字颜色为纯黑色
-	if name == theme.ColorNameDisabled {
-		return &color.NRGBA{R: 0, G: 0, B: 0, A: 255} // RGBA(0,0,0,255)
-	}
-	// 其他颜色使用默认主题设置
-	return theme.DefaultTheme().Color(name, variant)
-}
-
-// Font 获取字体资源（保持默认）
-func (m myTheme) Font(style fyne.TextStyle) fyne.Resource {
-	return theme.DefaultTheme().Font(style)
-}
-
-// Icon 获取图标资源（保持默认）
-func (m myTheme) Icon(name fyne.ThemeIconName) fyne.Resource {
-	return theme.DefaultTheme().Icon(name)
-}
-
-// Size 获取尺寸设置（保持默认）
-func (m myTheme) Size(name fyne.ThemeSizeName) float32 {
-	return theme.DefaultTheme().Size(name)
-}
-
-// CustomDomainEntry 自定义域名输入框组件
-// 继承自widget.Entry，添加焦点丢失回调功能
-type CustomDomainEntry struct {
-	widget.Entry
-	onFocusLost func() // 焦点丢失时的回调函数
-}
-
-// NewCustomDomainEntry 构造函数
-// 参数：onFocusLost - 焦点丢失时的回调函数
-func NewCustomDomainEntry(onFocusLost func()) *CustomDomainEntry {
-	entry := &CustomDomainEntry{onFocusLost: onFocusLost}
-	entry.ExtendBaseWidget(entry) // 必须调用以实现自定义组件
-	return entry
-}
-
-// FocusLost 重写焦点丢失事件处理
-func (e *CustomDomainEntry) FocusLost() {
-	e.Entry.FocusLost() // 调用基类方法
-	if e.onFocusLost != nil {
-		e.onFocusLost() // 执行自定义回调
-	}
-}
-
-// CustomPortEntry 自定义端口输入框组件
-// 继承自widget.Entry，添加获取焦点时自动填充默认值功能
-type CustomPortEntry struct {
-	widget.Entry
-}
-
-// NewCustomPortEntry 构造函数
-func NewCustomPortEntry() *CustomPortEntry {
-	entry := &CustomPortEntry{}
-	entry.ExtendBaseWidget(entry) // 必须调用以实现自定义组件
-	return entry
-}
-
-// FocusGained 重写获取焦点事件处理
-func (e *CustomPortEntry) FocusGained() {
-	e.Entry.FocusGained() // 调用基类方法
-	if e.Text == "" {
-		e.SetText("389") // 保持默认提示值，但实际使用时会解析输入值
-	}
 }
 
 func main() {
