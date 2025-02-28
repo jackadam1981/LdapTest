@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"time"
 
@@ -378,6 +379,10 @@ func main() {
 	ldapDNEntry := widget.NewEntry()
 	ldapDNEntry.SetPlaceHolder("请输入LDAP DN")
 
+	// 创建LDAP权限组输入框（既可以输入又可以选择）
+	ldapGroupEntry := widget.NewSelectEntry([]string{"Group1", "Group2", "Group3"})
+	ldapGroupEntry.SetPlaceHolder("请输入或选择权限组")
+
 	// 创建自定义域名输入框（带自动生成DN功能）
 	var domainEntry *CustomDomainEntry
 	domainEntry = NewCustomDomainEntry(func() {
@@ -391,7 +396,10 @@ func main() {
 		// 自动生成管理员DN和搜索DN
 		adminEntry.SetText("CN=Administrator,CN=Users," + domainDN)
 		searchDNEntry.SetText(domainDN)
-		ldapDNEntry.SetText("CN=ldap,OU=Ldap," + domainDN)
+		ldapDNEntry.SetText("CN=ldap,CN=Builtin," + domainDN)
+
+		// 修改组默认路径为CN=Builtin
+		ldapGroupEntry.SetText("CN=LDAP Connection,CN=Builtin," + domainDN)
 	})
 
 	// 设置默认域名和提示文本
@@ -410,6 +418,161 @@ func main() {
 	ldappasswordEntry := widget.NewPasswordEntry()
 	ldappasswordEntry.SetPlaceHolder("请输入LDAP密码")
 
+	// Create the status area first
+	statusArea := widget.NewMultiLineEntry()
+	statusArea.Disable()                    // 设置为只读模式
+	statusArea.Wrapping = fyne.TextWrapWord // 启用自动换行
+
+	// Define the updateStatus function after statusArea is defined
+	updateStatus := func(status string) {
+		currentTime := time.Now().Format("15:04:05")      // 获取当前时间
+		statusArea.TextStyle = fyne.TextStyle{Bold: true} // 设置粗体显示
+		newText := statusArea.Text + currentTime + " " + status + "\n"
+		statusArea.SetText(newText)
+		statusArea.CursorRow = len(strings.Split(statusArea.Text, "\n")) - 1 // 自动滚动到底部
+	}
+
+	// Now create the groupButton using the updateStatus function
+	groupButton := widget.NewButton("检查权限组", func() {
+		// 创建 LDAP 客户端实例
+		client := LDAPClient{
+			host:         domainEntry.Text,
+			port:         389, // 默认端口
+			bindDN:       adminEntry.Text,
+			bindPassword: passwordEntry.Text,
+			updateFunc:   updateStatus,
+		}
+
+		// 测试 LDAP 服务
+		if !client.testLDAPService() {
+			updateStatus("LDAP 服务异常")
+			return
+		}
+
+		// 修改搜索请求获取完整DN
+		searchRequest := ldap.NewSearchRequest(
+			searchDNEntry.Text, // 使用完整的基准DN
+			ldap.ScopeWholeSubtree,
+			ldap.NeverDerefAliases,
+			0, 0, false,
+			"(objectClass=group)",
+			[]string{"dn", "cn"}, // 同时获取DN和CN
+			nil,
+		)
+
+		log.Println("尝试连接到 LDAP 服务器...")
+		l, err := ldap.DialURL(fmt.Sprintf("ldap://%s:%d", client.host, client.port))
+		if err != nil {
+			updateStatus(fmt.Sprintf("连接失败: %v", err))
+			log.Printf("连接失败: %v", err)
+			if netErr, ok := err.(net.Error); ok {
+				if netErr.Timeout() {
+					log.Println("连接超时")
+				}
+				if netErr.Temporary() {
+					log.Println("临时网络错误")
+				}
+			}
+			log.Printf("详细错误信息: %T - %v", err, err)
+			return
+		}
+		log.Println("连接到 LDAP 服务器成功")
+		defer l.Close()
+
+		log.Println("尝试绑定到 LDAP 服务器...")
+		if err := l.Bind(client.bindDN, client.bindPassword); err != nil {
+			updateStatus(fmt.Sprintf("绑定失败: %v", err))
+			log.Printf("绑定失败: %v", err)
+			return
+		}
+		log.Println("绑定到 LDAP 服务器成功")
+
+		log.Println("执行搜索请求...")
+		sr, err := l.Search(searchRequest)
+		if err != nil {
+			updateStatus(fmt.Sprintf("搜索失败: %v", err))
+			log.Printf("搜索失败: %v", err)
+			return
+		}
+		log.Println("搜索请求成功")
+
+		var validGroups []string
+		for _, entry := range sr.Entries {
+			validGroups = append(validGroups, entry.DN)
+		}
+
+		// 按字母顺序排序（不区分大小写）
+		sort.Slice(validGroups, func(i, j int) bool {
+			return strings.ToLower(validGroups[i]) < strings.ToLower(validGroups[j])
+		})
+
+		// 检查输入的组DN是否存在
+		enteredGroupDN := ldapGroupEntry.Text
+		groupExists := false
+		for _, groupDN := range validGroups {
+			if groupDN == enteredGroupDN {
+				groupExists = true
+				break
+			}
+		}
+
+		if groupExists {
+			updateStatus(fmt.Sprintf("权限组 '%s' 已存在", enteredGroupDN))
+		} else {
+			dialog.ShowConfirm("权限组不存在", "是否创建新权限组或选择现有权限组？", func(create bool) {
+				if create {
+					// 直接使用输入的完整DN
+					groupDN := enteredGroupDN
+
+					// 确保目标容器存在
+					parentDN := strings.Join(strings.Split(groupDN, ",")[1:], ",")
+					if err := client.ensureDNExists(parentDN); err != nil {
+						updateStatus(fmt.Sprintf("创建路径失败: %v", err))
+						return
+					}
+
+					addRequest := ldap.NewAddRequest(groupDN, nil)
+					addRequest.Attribute("objectClass", []string{"top", "group"})
+					addRequest.Attribute("cn", []string{strings.TrimPrefix(
+						strings.SplitN(groupDN, ",", 2)[0],
+						"CN=",
+					)})
+
+					log.Println("检查连接状态...")
+					// 创建新的独立连接用于写操作
+					writeConn, err := ldap.DialURL(fmt.Sprintf("ldap://%s:%d",
+						client.host, client.port),
+						ldap.DialWithDialer(&net.Dialer{
+							KeepAlive: 15 * time.Second,
+							Timeout:   10 * time.Second,
+						}))
+					if err != nil {
+						updateStatus(fmt.Sprintf("创建写连接失败: %v", err))
+						return
+					}
+					defer writeConn.Close()
+
+					// 使用新连接进行绑定
+					if err := writeConn.Bind(client.bindDN, client.bindPassword); err != nil {
+						updateStatus(fmt.Sprintf("写连接绑定失败: %v", err))
+						return
+					}
+
+					log.Println("发送添加请求...")
+					if err := writeConn.Add(addRequest); err != nil {
+						updateStatus(fmt.Sprintf("创建权限组失败: %v", err))
+					} else {
+						updateStatus(fmt.Sprintf("权限组 '%s' 创建成功", enteredGroupDN))
+					}
+				} else {
+					updateStatus("选择现有权限组")
+					sort.Strings(validGroups)
+					ldapGroupEntry.SetOptions(validGroups)
+				}
+			}, myWindow)
+		}
+	})
+
 	// 创建过滤器输入框（用于用户搜索的过滤条件）
 	filterDNEntry := widget.NewEntry()
 	filterDNEntry.SetPlaceHolder("请输入过滤器")
@@ -423,11 +586,6 @@ func main() {
 	testPasswordEntry := widget.NewPasswordEntry()
 	testPasswordEntry.SetPlaceHolder("请输入测试密码")
 
-	// 创建带滚动条的状态显示区域
-	statusArea := widget.NewMultiLineEntry()
-	statusArea.Disable()                    // 设置为只读模式
-	statusArea.Wrapping = fyne.TextWrapWord // 启用自动换行
-
 	// 状态区域布局容器（确保最小显示高度）
 	background := canvas.NewRectangle(color.Transparent)
 	background.SetMinSize(fyne.NewSize(400, 60)) // 最小尺寸约束
@@ -435,15 +593,6 @@ func main() {
 		background,
 		container.NewVScroll(statusArea), // 垂直滚动容器
 	)
-
-	// 状态更新函数（带时间戳和自动滚动功能）
-	updateStatus := func(status string) {
-		currentTime := time.Now().Format("15:04:05")      // 获取当前时间
-		statusArea.TextStyle = fyne.TextStyle{Bold: true} // 设置粗体显示
-		newText := statusArea.Text + currentTime + " " + status + "\n"
-		statusArea.SetText(newText)
-		statusArea.CursorRow = len(strings.Split(statusArea.Text, "\n")) - 1 // 自动滚动到底部
-	}
 
 	// ping测试按钮回调函数
 	pingButton := widget.NewButton("连接测试", func() {
@@ -759,6 +908,10 @@ func main() {
 		),
 		container.NewBorder(nil, nil, makeLabel("Admin密码:"), adminTestButton,
 			passwordEntry,
+		),
+		// Add the LDAP permissions group entry here
+		container.NewBorder(nil, nil, makeLabel("Ldap权限组:"), groupButton,
+			ldapGroupEntry,
 		),
 		container.NewBorder(nil, nil, makeLabel("Ldap DN:"), nil,
 			ldapDNEntry,
