@@ -107,10 +107,11 @@ func (e *CustomPortEntry) FocusGained() {
 
 // LDAPClient 结构体定义LDAP客户端配置
 type LDAPClient struct {
-	host         string // LDAP服务器地址（IP或域名）
-	port         int    // LDAP服务端口（默认389）
-	bindDN       string // 绑定用识别名（用于认证的Distinguished Name）
-	bindPassword string // 绑定用密码
+	host         string       // LDAP服务器地址（IP或域名）
+	port         int          // LDAP服务端口（默认389）
+	bindDN       string       // 绑定用识别名（用于认证的Distinguished Name）
+	bindPassword string       // 绑定用密码
+	updateFunc   func(string) // 添加状态更新函数引用
 }
 
 // isPortOpen 检查LDAP服务端口是否开放
@@ -173,14 +174,14 @@ func (client *LDAPClient) testUserAuth(testUser, testPassword, searchDN string) 
 		return false
 	}
 
-	// 构建搜索请求
+	// 使用sAMAccountName进行AD兼容查询
 	searchRequest := ldap.NewSearchRequest(
-		searchDN,               // 搜索基准（例如：dc=example,dc=com）
-		ldap.ScopeWholeSubtree, // 搜索整个子树
-		ldap.NeverDerefAliases, // 不解除别名引用
-		0, 0, false,            // 无大小和时间限制
-		fmt.Sprintf("(uid=%s)", testUser), // 过滤条件（根据uid查找用户）
-		[]string{"dn"},                    // 返回属性（只需要识别名）
+		searchDN,
+		ldap.ScopeWholeSubtree,
+		ldap.NeverDerefAliases,
+		0, 0, false,
+		fmt.Sprintf("(sAMAccountName=%s)", testUser), // AD专用属性
+		[]string{"dn"},
 		nil,
 	)
 
@@ -206,6 +207,151 @@ func (client *LDAPClient) testUserAuth(testUser, testPassword, searchDN string) 
 
 	log.Println("用户认证成功")
 	return true
+}
+
+// extractUsernameFromDN 从DN中提取用户名
+func extractUsernameFromDN(dn string) string {
+	parts := strings.Split(dn, ",")
+	for _, part := range parts {
+		if strings.HasPrefix(part, "CN=") {
+			return strings.TrimPrefix(part, "CN=")
+		}
+	}
+	return ""
+}
+
+// searchUserInDomain 在整个域中搜索用户
+func (client *LDAPClient) searchUserInDomain(username string) (bool, string) {
+	url := fmt.Sprintf("ldap://%s:%d", client.host, client.port)
+	l, err := ldap.DialURL(url)
+	if err != nil {
+		log.Println("连接失败:", err)
+		return false, ""
+	}
+	defer l.Close()
+
+	// 使用管理员凭证进行绑定
+	if err := l.Bind(client.bindDN, client.bindPassword); err != nil {
+		log.Println("管理员绑定失败:", err)
+		return false, ""
+	}
+
+	// 使用自动生成的域DN作为搜索基准
+	domainParts := strings.Split(client.host, ".")
+	var baseDN string
+	for _, part := range domainParts {
+		baseDN += "dc=" + part + ","
+	}
+	baseDN = strings.TrimSuffix(baseDN, ",")
+
+	// 构建符合AD查询的过滤器
+	searchFilter := fmt.Sprintf("(&(objectClass=user)(name=%s*))", username)
+
+	searchRequest := ldap.NewSearchRequest(
+		baseDN,
+		ldap.ScopeWholeSubtree,
+		ldap.NeverDerefAliases,
+		0, 0, false,
+		searchFilter, // 使用新的过滤器
+		[]string{"distinguishedName"},
+		nil,
+	)
+
+	sr, err := l.Search(searchRequest)
+	if err != nil {
+		log.Printf("搜索失败 (基准DN: %s): %v", baseDN, err) // 添加详细日志
+		return false, ""
+	}
+
+	// 允许返回多个结果时选择第一个
+	if len(sr.Entries) > 0 {
+		return true, sr.Entries[0].DN
+	}
+	return false, ""
+}
+
+// ensureDNExists 递归检查/创建目标DN路径
+func (client *LDAPClient) ensureDNExists(targetDN string) error {
+	url := fmt.Sprintf("ldap://%s:%d", client.host, client.port)
+	l, err := ldap.DialURL(url)
+	if err != nil {
+		return fmt.Errorf("连接失败: %v", err)
+	}
+	defer l.Close()
+
+	if err := l.Bind(client.bindDN, client.bindPassword); err != nil {
+		return fmt.Errorf("管理员绑定失败: %v", err)
+	}
+
+	// 反向解析DN层级（从叶子节点到根节点）
+	parts := strings.Split(targetDN, ",")
+	for i := len(parts) - 1; i >= 0; i-- {
+		currentDN := strings.Join(parts[i:], ",")
+
+		// 检查当前DN是否存在
+		searchRequest := ldap.NewSearchRequest(
+			currentDN,
+			ldap.ScopeBaseObject,
+			ldap.NeverDerefAliases,
+			0, 0, false,
+			"(objectClass=*)",
+			[]string{"dn"},
+			nil,
+		)
+
+		if _, err := l.Search(searchRequest); err == nil {
+			continue // DN已存在
+		}
+
+		// 创建不存在的OU
+		if strings.HasPrefix(parts[i], "OU=") {
+			addRequest := ldap.NewAddRequest(currentDN, nil)
+			addRequest.Attribute("objectClass", []string{"organizationalUnit"})
+			addRequest.Attribute("ou", []string{strings.TrimPrefix(parts[i], "OU=")})
+
+			if err := l.Add(addRequest); err != nil {
+				return fmt.Errorf("创建OU失败 %s: %v", currentDN, err)
+			}
+			client.updateFunc(fmt.Sprintf("已创建OU: %s", currentDN)) // 使用结构体中的引用
+		}
+	}
+	return nil
+}
+
+// moveUser 执行用户移动操作
+func (client *LDAPClient) moveUser(oldDN, newDN string) error {
+	url := fmt.Sprintf("ldap://%s:%d", client.host, client.port)
+	l, err := ldap.DialURL(url)
+	if err != nil {
+		return fmt.Errorf("连接失败: %v", err)
+	}
+	defer l.Close()
+
+	if err := l.Bind(client.bindDN, client.bindPassword); err != nil {
+		return fmt.Errorf("管理员绑定失败: %v", err)
+	}
+
+	// 解析新DN的RDN和上级DN
+	newRDNParts := strings.SplitN(newDN, ",", 2)
+	if len(newRDNParts) != 2 {
+		return fmt.Errorf("无效的新DN格式")
+	}
+	newRDN := newRDNParts[0]
+	newSuperior := newRDNParts[1]
+
+	// 创建ModifyDN请求
+	modifyDNRequest := ldap.NewModifyDNRequest(
+		oldDN,
+		newRDN,
+		true, // 删除旧RDN
+		newSuperior,
+	)
+
+	// 执行移动操作
+	if err := l.ModifyDN(modifyDNRequest); err != nil {
+		return fmt.Errorf("移动操作失败: %v", err)
+	}
+	return nil
 }
 
 func main() {
@@ -235,7 +381,6 @@ func main() {
 	// 创建自定义域名输入框（带自动生成DN功能）
 	var domainEntry *CustomDomainEntry
 	domainEntry = NewCustomDomainEntry(func() {
-		// 将域名转换为DN格式（例如：example.com -> dc=example,dc=com）
 		domainParts := strings.Split(domainEntry.Text, ".")
 		var dnParts []string
 		for _, part := range domainParts {
@@ -246,7 +391,7 @@ func main() {
 		// 自动生成管理员DN和搜索DN
 		adminEntry.SetText("CN=Administrator,CN=Users," + domainDN)
 		searchDNEntry.SetText(domainDN)
-		ldapDNEntry.SetText("CN=ldap,CN=Ldap," + domainDN)
+		ldapDNEntry.SetText("CN=ldap,OU=Ldap," + domainDN)
 	})
 
 	// 设置默认域名和提示文本
@@ -421,6 +566,7 @@ func main() {
 			port:         ldapPort,
 			bindDN:       adminEntry.Text,
 			bindPassword: passwordEntry.Text,
+			updateFunc:   updateStatus, // 传递状态更新函数
 		}
 
 		// 分步骤测试
@@ -459,12 +605,58 @@ func main() {
 			port:         port,
 			bindDN:       adminEntry.Text,
 			bindPassword: passwordEntry.Text,
+			updateFunc:   updateStatus, // 传递状态更新函数
 		}
 
 		// 测试管理员凭证有效性
 		if client.testLDAPService() {
 			updateStatus("LDAP管理员验证成功")
-			// TODO: 实际创建LDAP账号的逻辑需要补充
+
+			// 从输入的LDAP DN中提取用户名
+			userDN := ldapDNEntry.Text
+			username := extractUsernameFromDN(userDN)
+
+			// 在整个域中搜索用户
+			userExists, foundDN := client.searchUserInDomain(username)
+
+			if userExists {
+				updateStatus("用户已存在")
+
+				// 弹出提示框询问是否移动用户
+				dialog.ShowConfirm("用户已存在", "是否移动用户？", func(move bool) {
+					if move {
+						updateStatus("正在移动用户到新的DN")
+						// 递归创建目标DN路径
+						if err := client.ensureDNExists(userDN); err != nil {
+							dialog.ShowError(fmt.Errorf("创建路径失败: %v", err), myWindow)
+							return
+						}
+
+						// 执行用户移动操作
+						if err := client.moveUser(foundDN, userDN); err != nil {
+							dialog.ShowError(fmt.Errorf("移动用户失败: %v", err), myWindow)
+							updateStatus("用户移动失败")
+						} else {
+							updateStatus(fmt.Sprintf("用户已成功移动到 %s", userDN))
+						}
+					} else {
+						// 更新LDAP DN为查询到的用户DN
+						ldapDNEntry.SetText(foundDN)
+					}
+
+					// 弹出提示框询问是否更新用户密码
+					dialog.ShowConfirm("更新密码", "是否更新用户密码？", func(updatePassword bool) {
+						if updatePassword {
+							updateStatus("更新用户密码")
+							// TODO: 实现更新密码逻辑
+						}
+					}, myWindow)
+				}, myWindow)
+			} else {
+				updateStatus("用户不存在，创建新用户")
+				// 递归创建用户OU，创建用户，设置密码为LDAP密码
+				// TODO: 实现创建用户逻辑
+			}
 		} else {
 			updateStatus("LDAP管理员验证失败")
 		}
@@ -493,6 +685,7 @@ func main() {
 			port:         port,
 			bindDN:       adminEntry.Text,
 			bindPassword: passwordEntry.Text,
+			updateFunc:   updateStatus, // 传递状态更新函数
 		}
 
 		// 执行用户认证测试
@@ -526,6 +719,7 @@ func main() {
 			port:         port,
 			bindDN:       ldapDNEntry.Text,
 			bindPassword: ldappasswordEntry.Text,
+			updateFunc:   updateStatus, // 传递状态更新函数
 		}
 
 		// 执行用户认证测试
