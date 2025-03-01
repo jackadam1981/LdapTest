@@ -537,6 +537,15 @@ func main() {
 						strings.SplitN(groupDN, ",", 2)[0],
 						"CN=",
 					)})
+					addRequest.Attribute("sAMAccountName", []string{strings.TrimPrefix(
+						strings.SplitN(groupDN, ",", 2)[0],
+						"CN=",
+					)})
+					addRequest.Attribute("groupType", []string{"-2147483646"})
+
+					// 添加以下两行设置描述字段
+					groupDescription := "LDAP管理专用组" // 可替换为从输入框获取
+					addRequest.Attribute("description", []string{groupDescription})
 
 					log.Println("检查连接状态...")
 					// 创建新的独立连接用于写操作
