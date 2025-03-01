@@ -469,26 +469,7 @@ func main() {
 
 	// Now create the groupButton using the updateStatus function
 	groupButton := widget.NewButton("检查权限组", func() {
-		// 输入字段非空检查
-		if adminEntry.Text == "" {
-			dialog.ShowError(fmt.Errorf("admin DN不能为空"), myWindow)
-			updateStatus("错误：请填写admin DN")
-			return
-		}
-		if passwordEntry.Text == "" {
-			dialog.ShowError(fmt.Errorf("admin密码不能为空"), myWindow)
-			updateStatus("错误：请填写admin密码")
-			return
-		}
-		if domainEntry.Text == "" {
-			dialog.ShowError(fmt.Errorf("服务器地址不能为空"), myWindow)
-			updateStatus("错误：请填写服务器地址")
-			return
-		}
-
-		// 创建 LDAP 客户端实例（直接使用已验证的端口号）
-		var port int
-		fmt.Sscanf(portEntry.Text, "%d", &port) // 安全转换，因CustomPortEntry已保证有效性
+		// 创建 LDAP 客户端实例
 		client := LDAPClient{
 			host:         domainEntry.Text,
 			port:         port, // 直接使用已验证的端口值
