@@ -331,10 +331,12 @@ func (client *LDAPClient) ensureDNExists(targetDN string) error {
 			addRequest.Attribute("cn", []string{strings.TrimPrefix(parts[i], "CN=")})
 
 			if err := l.Add(addRequest); err != nil {
-				// 忽略已存在错误（代码68）
-				if ldapErr, ok := err.(*ldap.Error); !ok || ldapErr.ResultCode != ldap.LDAPResultEntryAlreadyExists {
-					return fmt.Errorf("创建容器失败 %s: %v", currentDN, err)
+				// 统一处理已存在错误（代码68）
+				if ldapErr, ok := err.(*ldap.Error); ok && ldapErr.ResultCode == ldap.LDAPResultEntryAlreadyExists {
+					client.updateFunc(fmt.Sprintf("容器已存在: %s", currentDN))
+					continue
 				}
+				return fmt.Errorf("创建容器失败 %s: %v", currentDN, err)
 			}
 			client.updateFunc(fmt.Sprintf("已创建容器: %s", currentDN))
 		}
@@ -346,9 +348,14 @@ func (client *LDAPClient) ensureDNExists(targetDN string) error {
 			addRequest.Attribute("ou", []string{strings.TrimPrefix(parts[i], "OU=")})
 
 			if err := l.Add(addRequest); err != nil {
+				// 添加对已存在错误的处理
+				if ldapErr, ok := err.(*ldap.Error); ok && ldapErr.ResultCode == ldap.LDAPResultEntryAlreadyExists {
+					client.updateFunc(fmt.Sprintf("OU已存在: %s", currentDN))
+					continue
+				}
 				return fmt.Errorf("创建OU失败 %s: %v", currentDN, err)
 			}
-			client.updateFunc(fmt.Sprintf("已创建OU: %s", currentDN)) // 使用结构体中的引用
+			client.updateFunc(fmt.Sprintf("已创建OU: %s", currentDN))
 		}
 	}
 	return nil
@@ -356,26 +363,40 @@ func (client *LDAPClient) ensureDNExists(targetDN string) error {
 
 // moveUser 执行用户移动操作
 func (client *LDAPClient) moveUser(oldDN, newDN string) error {
+	log.Printf("开始移动操作 | 源: %s -> 目标: %s", oldDN, newDN)
+
+	// 新增连接信息日志
+	log.Printf("连接信息 | 服务器: %s:%d | 绑定DN: %s",
+		client.host, client.port, client.bindDN)
+
 	url := fmt.Sprintf("ldap://%s:%d", client.host, client.port)
 	l, err := ldap.DialURL(url)
 	if err != nil {
+		log.Printf("连接失败 | 错误: %v | URL: %s", err, url)
 		return fmt.Errorf("连接失败: %v", err)
 	}
 	defer l.Close()
 
+	// 绑定操作添加日志
+	log.Printf("尝试绑定管理员账户 | DN: %s", client.bindDN)
 	if err := l.Bind(client.bindDN, client.bindPassword); err != nil {
+		log.Printf("绑定失败 | DN: %s | 错误: %v", client.bindDN, err)
 		return fmt.Errorf("管理员绑定失败: %v", err)
 	}
 
 	// 解析新DN的RDN和上级DN
 	newRDNParts := strings.SplitN(newDN, ",", 2)
 	if len(newRDNParts) != 2 {
-		return fmt.Errorf("无效的新DN格式")
+		return fmt.Errorf("无效的新DN格式，示例: CN=NewName,OU=容器")
 	}
 	newRDN := newRDNParts[0]
 	newSuperior := newRDNParts[1]
 
-	// 创建ModifyDN请求
+	// 创建ModifyDN请求前检查目标容器是否存在
+	if err := client.ensureDNExists(newSuperior); err != nil {
+		return fmt.Errorf("目标容器验证失败: %v", err)
+	}
+
 	modifyDNRequest := ldap.NewModifyDNRequest(
 		oldDN,
 		newRDN,
@@ -383,10 +404,20 @@ func (client *LDAPClient) moveUser(oldDN, newDN string) error {
 		newSuperior,
 	)
 
-	// 执行移动操作
+	// 添加ModifyDN请求详情日志
+	log.Printf("执行ModifyDN请求 | 旧RDN: %s | 新RDN: %s | 新上级: %s",
+		oldDN, newRDN, newSuperior)
+
 	if err := l.ModifyDN(modifyDNRequest); err != nil {
+		log.Printf("ModifyDN操作失败 | 错误类型: %T | 详细错误: %+v", err, err)
+		if ldapErr, ok := err.(*ldap.Error); ok {
+			log.Printf("LDAP错误详情 | 代码: %d | 消息: %s | 匹配的DN: %s",
+				ldapErr.ResultCode, ldapErr.Err.Error(), ldapErr.MatchedDN)
+		}
 		return fmt.Errorf("移动操作失败: %v", err)
 	}
+
+	log.Printf("移动操作完成 | 新完整DN: %s", newDN)
 	return nil
 }
 
@@ -469,10 +500,17 @@ func main() {
 
 	// Now create the groupButton using the updateStatus function
 	groupButton := widget.NewButton("检查权限组", func() {
+		// 在创建client实例前添加端口解析逻辑
+		var port int
+		if _, err := fmt.Sscanf(portEntry.Text, "%d", &port); err != nil {
+			updateStatus("无效的端口号")
+			return
+		}
+
 		// 创建 LDAP 客户端实例
 		client := LDAPClient{
 			host:         domainEntry.Text,
-			port:         port, // 直接使用已验证的端口值
+			port:         port, // 使用已解析的端口值
 			bindDN:       adminEntry.Text,
 			bindPassword: passwordEntry.Text,
 			updateFunc:   updateStatus,
@@ -563,10 +601,15 @@ func main() {
 				func(move bool) {
 					if move {
 						updateStatus(fmt.Sprintf("正在移动组 %s -> %s", foundGroupDN, ldapGroupEntry.Text))
+						log.Printf("开始移动组操作 | 源DN: %s | 目标DN: %s", foundGroupDN, ldapGroupEntry.Text)
+
 						if err := client.moveUser(foundGroupDN, ldapGroupEntry.Text); err != nil {
+							log.Printf("组移动失败 | 错误详情: %v | 源DN: %s | 目标DN: %s",
+								err, foundGroupDN, ldapGroupEntry.Text)
 							dialog.ShowError(fmt.Errorf("移动失败: %v", err), myWindow)
 							updateStatus("组移动失败")
 						} else {
+							log.Printf("组移动成功 | 新位置: %s", ldapGroupEntry.Text)
 							updateStatus("组移动成功")
 							ldapGroupEntry.SetText(ldapGroupEntry.Text) // 保持新位置
 						}
