@@ -134,6 +134,18 @@ type LDAPClient struct {
 	updateFunc   func(string) // 添加状态更新函数引用
 }
 
+// encodePassword 将密码编码为Active Directory所需的格式
+func encodePassword(password string) string {
+	// Active Directory需要UTF-16LE编码的密码，并用双引号包围
+	utf16le := make([]byte, 0, len(password)*2+2)
+	utf16le = append(utf16le, '"')
+	for _, r := range password {
+		utf16le = append(utf16le, byte(r), byte(r>>8))
+	}
+	utf16le = append(utf16le, '"')
+	return string(utf16le)
+}
+
 // isPortOpen 检查LDAP服务端口是否开放
 // 返回值：bool - true表示端口开放，false表示关闭
 func (client *LDAPClient) isPortOpen() bool {
@@ -305,8 +317,15 @@ func (client *LDAPClient) ensureDNExists(targetDN string) error {
 
 	// 反向解析DN层级（从叶子节点到根节点）
 	parts := strings.Split(targetDN, ",")
+	var currentDN string
+
+	// 从根节点开始构建和检查路径
 	for i := len(parts) - 1; i >= 0; i-- {
-		currentDN := strings.Join(parts[i:], ",")
+		if i == len(parts)-1 {
+			currentDN = parts[i]
+		} else {
+			currentDN = parts[i] + "," + currentDN
+		}
 
 		// 检查当前DN是否存在
 		searchRequest := ldap.NewSearchRequest(
@@ -315,49 +334,47 @@ func (client *LDAPClient) ensureDNExists(targetDN string) error {
 			ldap.NeverDerefAliases,
 			0, 0, false,
 			"(objectClass=*)",
-			[]string{"dn"},
+			[]string{"objectClass"},
 			nil,
 		)
 
-		if _, err := l.Search(searchRequest); err == nil {
-			continue // DN已存在
-		}
+		_, err := l.Search(searchRequest)
+		if err != nil {
+			// 如果搜索失败，尝试创建该层级
+			var addRequest *ldap.AddRequest
 
-		// 修改容器创建逻辑
-		if strings.HasPrefix(parts[i], "CN=") {
-			// 创建通用容器（适用于AD）
-			addRequest := ldap.NewAddRequest(currentDN, nil)
-			addRequest.Attribute("objectClass", []string{"top", "container"})
-			addRequest.Attribute("cn", []string{strings.TrimPrefix(parts[i], "CN=")})
-
-			if err := l.Add(addRequest); err != nil {
-				// 统一处理已存在错误（代码68）
-				if ldapErr, ok := err.(*ldap.Error); ok && ldapErr.ResultCode == ldap.LDAPResultEntryAlreadyExists {
-					client.updateFunc(fmt.Sprintf("容器已存在: %s", currentDN))
-					continue
-				}
-				return fmt.Errorf("创建容器失败 %s: %v", currentDN, err)
+			if strings.HasPrefix(parts[i], "CN=") {
+				name := strings.TrimPrefix(parts[i], "CN=")
+				addRequest = ldap.NewAddRequest(currentDN, nil)
+				addRequest.Attribute("objectClass", []string{"top", "container"})
+				addRequest.Attribute("cn", []string{name})
+				client.updateFunc(fmt.Sprintf("正在创建容器: %s", currentDN))
+			} else if strings.HasPrefix(parts[i], "OU=") {
+				name := strings.TrimPrefix(parts[i], "OU=")
+				addRequest = ldap.NewAddRequest(currentDN, nil)
+				addRequest.Attribute("objectClass", []string{"top", "organizationalUnit"})
+				addRequest.Attribute("ou", []string{name})
+				client.updateFunc(fmt.Sprintf("正在创建组织单位: %s", currentDN))
+			} else if strings.HasPrefix(parts[i], "DC=") {
+				// 跳过 DC 组件，因为它们应该已经存在
+				continue
 			}
-			client.updateFunc(fmt.Sprintf("已创建容器: %s", currentDN))
-		}
 
-		// 创建不存在的OU
-		if strings.HasPrefix(parts[i], "OU=") {
-			addRequest := ldap.NewAddRequest(currentDN, nil)
-			addRequest.Attribute("objectClass", []string{"organizationalUnit"})
-			addRequest.Attribute("ou", []string{strings.TrimPrefix(parts[i], "OU=")})
-
-			if err := l.Add(addRequest); err != nil {
-				// 添加对已存在错误的处理
-				if ldapErr, ok := err.(*ldap.Error); ok && ldapErr.ResultCode == ldap.LDAPResultEntryAlreadyExists {
-					client.updateFunc(fmt.Sprintf("OU已存在: %s", currentDN))
-					continue
+			if addRequest != nil {
+				err = l.Add(addRequest)
+				if err != nil {
+					// 忽略"已存在"错误
+					if ldapErr, ok := err.(*ldap.Error); ok && ldapErr.ResultCode == ldap.LDAPResultEntryAlreadyExists {
+						client.updateFunc(fmt.Sprintf("容器已存在: %s", currentDN))
+						continue
+					}
+					return fmt.Errorf("创建容器失败 %s: %v", currentDN, err)
 				}
-				return fmt.Errorf("创建OU失败 %s: %v", currentDN, err)
+				client.updateFunc(fmt.Sprintf("成功创建: %s", currentDN))
 			}
-			client.updateFunc(fmt.Sprintf("已创建OU: %s", currentDN))
 		}
 	}
+
 	return nil
 }
 
@@ -941,6 +958,158 @@ func main() {
 			return
 		}
 
+		// 解析端口号
+		var port int
+		if _, err := fmt.Sscanf(portEntry.Text, "%d", &port); err != nil {
+			updateStatus("无效的端口号")
+			return
+		}
+
+		// 创建 LDAP 客户端实例
+		client := LDAPClient{
+			host:         domainEntry.Text,
+			port:         port,
+			bindDN:       adminEntry.Text,
+			bindPassword: passwordEntry.Text,
+			updateFunc:   updateStatus,
+		}
+
+		// 先检查端口连通性
+		if !client.isPortOpen() {
+			updateStatus(fmt.Sprintf("端口 %d 未开放", port))
+			return
+		}
+
+		// 验证管理员凭证
+		if !client.testLDAPService() {
+			dialog.ShowError(fmt.Errorf("管理员认证失败\n可能原因：\n1. 密码错误\n2. DN格式错误\n3. 权限不足"), myWindow)
+			updateStatus("管理员凭证验证失败")
+			return
+		}
+
+		// 从输入的DN中提取CN
+		enteredCN := strings.SplitN(ldapDNEntry.Text, ",", 2)[0]
+		if !strings.HasPrefix(enteredCN, "CN=") {
+			updateStatus("无效的DN格式")
+			return
+		}
+		userName := strings.TrimPrefix(enteredCN, "CN=")
+
+		// 修改搜索请求为按CN查询
+		searchRequest := ldap.NewSearchRequest(
+			searchDNEntry.Text,
+			ldap.ScopeWholeSubtree,
+			ldap.NeverDerefAliases,
+			0, 0, false,
+			fmt.Sprintf("(&(objectClass=user)(cn=%s))", ldap.EscapeFilter(userName)),
+			[]string{"dn"},
+			nil,
+		)
+
+		log.Println("尝试连接到 LDAP 服务器...")
+		l, err := ldap.DialURL(fmt.Sprintf("ldap://%s:%d", client.host, client.port))
+		if err != nil {
+			updateStatus(fmt.Sprintf("连接失败: %v", err))
+			log.Printf("连接失败: %v", err)
+			return
+		}
+		log.Println("连接到 LDAP 服务器成功")
+		defer l.Close()
+
+		log.Println("尝试绑定到 LDAP 服务器...")
+		if err := l.Bind(client.bindDN, client.bindPassword); err != nil {
+			updateStatus(fmt.Sprintf("绑定失败: %v", err))
+			log.Printf("绑定失败: %v", err)
+			return
+		}
+		log.Println("绑定到 LDAP 服务器成功")
+
+		log.Println("执行搜索请求...")
+		sr, err := l.Search(searchRequest)
+		if err != nil {
+			updateStatus(fmt.Sprintf("搜索失败: %v", err))
+			return
+		}
+
+		// 检查是否存在同名用户
+		if len(sr.Entries) > 0 {
+			foundUserDN := sr.Entries[0].DN
+
+			// 当DN完全相同时（不区分大小写）
+			if strings.EqualFold(strings.ToLower(foundUserDN), strings.ToLower(ldapDNEntry.Text)) {
+				dialog.ShowError(fmt.Errorf("用户已存在且位置相同：%s", foundUserDN), myWindow)
+				updateStatus("用户已存在且位置相同")
+				return
+			}
+
+			// 提示是否移动用户
+			dialog.ShowConfirm("用户已存在",
+				fmt.Sprintf("发现同名用户：\n%s\n\n当前输入位置：\n%s\n\n是否要移动用户？",
+					foundUserDN,
+					ldapDNEntry.Text),
+				func(move bool) {
+					if move {
+						updateStatus(fmt.Sprintf("正在移动用户 %s -> %s", foundUserDN, ldapDNEntry.Text))
+						log.Printf("开始移动用户操作 | 源DN: %s | 目标DN: %s", foundUserDN, ldapDNEntry.Text)
+
+						if err := client.moveUser(foundUserDN, ldapDNEntry.Text); err != nil {
+							log.Printf("用户移动失败 | 错误详情: %v | 源DN: %s | 目标DN: %s",
+								err, foundUserDN, ldapDNEntry.Text)
+							dialog.ShowError(fmt.Errorf("移动失败: %v", err), myWindow)
+							updateStatus("用户移动失败")
+						} else {
+							log.Printf("用户移动成功 | 新位置: %s", ldapDNEntry.Text)
+							updateStatus("用户移动成功")
+							ldapDNEntry.SetText(ldapDNEntry.Text) // 保持新位置
+						}
+					} else {
+						// 自动填充查询到的用户位置
+						ldapDNEntry.SetText(foundUserDN)
+						updateStatus("已使用现有用户位置：" + foundUserDN)
+					}
+				}, myWindow)
+			return
+		}
+
+		// 不存在则继续创建流程
+		updateStatus("未找到同名用户，准备创建新用户...")
+
+		// 确保目标路径存在
+		parentDN := strings.SplitN(ldapDNEntry.Text, ",", 2)[1]
+		if err := client.ensureDNExists(parentDN); err != nil {
+			dialog.ShowError(fmt.Errorf("创建路径失败: %v", err), myWindow)
+			updateStatus("创建用户失败：无法创建目标路径")
+			return
+		}
+
+		// 创建新用户
+		addRequest := ldap.NewAddRequest(ldapDNEntry.Text, nil)
+		addRequest.Attribute("objectClass", []string{"top", "person", "organizationalPerson", "user"})
+		addRequest.Attribute("sAMAccountName", []string{userName})
+		addRequest.Attribute("userAccountControl", []string{"2"}) // 禁用账户 (ACCOUNTDISABLE)
+
+		// 添加必需的属性
+		addRequest.Attribute("givenName", []string{userName})
+		addRequest.Attribute("sn", []string{userName})
+		addRequest.Attribute("displayName", []string{userName})
+		addRequest.Attribute("name", []string{userName})
+		addRequest.Attribute("userPrincipalName", []string{fmt.Sprintf("%s@%s", userName, client.host)})
+
+		if err := l.Add(addRequest); err != nil {
+			dialog.ShowError(fmt.Errorf("创建用户失败: %v", err), myWindow)
+			updateStatus(fmt.Sprintf("创建用户失败: %v", err))
+			return
+		}
+
+		// 用户创建成功后，设置额外的属性
+		modifyRequest := ldap.NewModifyRequest(ldapDNEntry.Text, nil)
+		modifyRequest.Replace("userAccountControl", []string{"2"}) // 确保账户禁用
+
+		if err := l.Modify(modifyRequest); err != nil {
+			updateStatus(fmt.Sprintf("警告：用户创建成功，但设置账户控制失败: %v", err))
+		}
+
+		updateStatus(fmt.Sprintf("成功创建新用户: %s（账户已禁用）", ldapDNEntry.Text))
 	})
 
 	// 管理员验证用户按钮回调函数
