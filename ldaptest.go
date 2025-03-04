@@ -384,12 +384,22 @@ func (client *LDAPClient) ensureDNExists(targetDN string) error {
 				addRequest = ldap.NewAddRequest(currentDN, nil)
 				addRequest.Attribute("objectClass", []string{"top", "container"})
 				addRequest.Attribute("cn", []string{name})
+				addRequest.Attribute("showInAdvancedViewOnly", []string{"FALSE"})
+				addRequest.Attribute("description", []string{"自动创建的容器"})
 				client.updateFunc(fmt.Sprintf("正在创建容器: %s", currentDN))
 			} else if strings.HasPrefix(parts[i], "OU=") {
 				name := strings.TrimPrefix(parts[i], "OU=")
 				addRequest = ldap.NewAddRequest(currentDN, nil)
 				addRequest.Attribute("objectClass", []string{"top", "organizationalUnit"})
 				addRequest.Attribute("ou", []string{name})
+				addRequest.Attribute("name", []string{name})
+				addRequest.Attribute("displayName", []string{name})
+				addRequest.Attribute("description", []string{"自动创建的组织单位"})
+				addRequest.Attribute("showInAdvancedViewOnly", []string{"FALSE"})
+				// 添加 managedBy 属性（可选，指定 OU 的管理者）
+				if client.bindDN != "" {
+					addRequest.Attribute("managedBy", []string{client.bindDN})
+				}
 				client.updateFunc(fmt.Sprintf("正在创建组织单位: %s", currentDN))
 			} else if strings.HasPrefix(parts[i], "DC=") {
 				// 跳过 DC 组件，因为它们应该已经存在
