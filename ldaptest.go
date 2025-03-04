@@ -88,24 +88,13 @@ func (e *CustomDomainEntry) FocusLost() {
 // 继承自widget.Entry，添加获取焦点时自动填充默认值功能
 type CustomPortEntry struct {
 	widget.Entry
-	onValidate func(string) bool
 }
 
 // NewCustomPortEntry 构造函数
 func NewCustomPortEntry() *CustomPortEntry {
 	entry := &CustomPortEntry{}
 	entry.ExtendBaseWidget(entry)
-
-	entry.onValidate = func(text string) bool {
-		var port int
-		if _, err := fmt.Sscanf(text, "%d", &port); err != nil || port < 1 || port > 65535 {
-			dialog.ShowError(fmt.Errorf("无效端口号：%s", text), fyne.CurrentApp().Driver().AllWindows()[0])
-			entry.SetText("389")
-			return false
-		}
-		return true
-	}
-
+	entry.SetText("389") // 设置初始显示值
 	return entry
 }
 
@@ -113,16 +102,41 @@ func NewCustomPortEntry() *CustomPortEntry {
 func (e *CustomPortEntry) FocusLost() {
 	e.Entry.FocusLost()
 	if e.Text == "" {
-		e.SetText("389") // 保持焦点丢失时填充默认值
+		if isSSLEnabled {
+			e.SetText("636")
+		} else {
+			e.SetText("389")
+		}
 	}
-	e.onValidate(e.Text)
 }
 
 func (e *CustomPortEntry) FocusGained() {
 	if e.Text == "" {
+		if isSSLEnabled {
+			e.SetText("636")
+		} else {
+			e.SetText("389")
+		}
+	}
+	e.Entry.FocusGained()
+}
+
+// SetDefaultPort 设置默认端口
+func (e *CustomPortEntry) SetDefaultPort(ssl bool) {
+	if ssl {
+		e.SetText("636")
+	} else {
 		e.SetText("389")
 	}
-	e.Entry.FocusGained() // 调用基类方法
+}
+
+// GetPort 获取当前端口号
+func (e *CustomPortEntry) GetPort() (int, error) {
+	var port int
+	if _, err := fmt.Sscanf(e.Text, "%d", &port); err != nil || port < 1 || port > 65535 {
+		return 0, fmt.Errorf("无效端口号：%s", e.Text)
+	}
+	return port, nil
 }
 
 // LDAPClient 结构体定义LDAP客户端配置
@@ -132,6 +146,7 @@ type LDAPClient struct {
 	bindDN       string       // 绑定用识别名（用于认证的Distinguished Name）
 	bindPassword string       // 绑定用密码
 	updateFunc   func(string) // 添加状态更新函数引用
+	conn         *ldap.Conn   // LDAP连接实例
 }
 
 // 全局变量
@@ -164,22 +179,95 @@ func (client *LDAPClient) isPortOpen() bool {
 	return true
 }
 
-// testLDAPService 测试LDAP服务连通性
-// 返回值：bool - true表示服务正常，false表示异常
-func (client *LDAPClient) testLDAPService() bool {
-	url := fmt.Sprintf("ldap://%s:%d", client.host, client.port)
-	// 建立LDAP连接
-	l, err := ldap.DialURL(url)
-	if err != nil {
-		log.Println("连接失败:", err)
-		return false
+// getURL 根据SSL状态返回合适的LDAP URL
+func (client *LDAPClient) getURL() string {
+	scheme := "ldap"
+	if isSSLEnabled {
+		scheme = "ldaps"
 	}
-	defer l.Close() // 确保连接关闭
+	return fmt.Sprintf("%s://%s:%d", scheme, client.host, client.port)
+}
 
-	// 使用提供的凭证进行绑定验证
-	err = l.Bind(client.bindDN, client.bindPassword)
+// connect 建立LDAP连接
+func (client *LDAPClient) connect() error {
+	if client.conn != nil {
+		// 如果已经有连接，先检查连接是否有效
+		searchRequest := ldap.NewSearchRequest(
+			"",
+			ldap.ScopeBaseObject,
+			ldap.NeverDerefAliases,
+			0, 0, false,
+			"(objectClass=*)",
+			[]string{"supportedLDAPVersion"},
+			nil,
+		)
+
+		_, err := client.conn.Search(searchRequest)
+		if err == nil {
+			// 连接仍然有效，直接返回
+			return nil
+		}
+		// 连接无效，关闭它
+		client.conn.Close()
+		client.conn = nil
+	}
+
+	// 建立新连接
+	var err error
+	client.conn, err = ldap.DialURL(client.getURL())
 	if err != nil {
-		log.Println("绑定失败:", err)
+		return fmt.Errorf("连接失败: %v", err)
+	}
+
+	return nil
+}
+
+// bind 使用指定的凭据进行LDAP绑定
+func (client *LDAPClient) bind(bindDN, bindPassword string) error {
+	if client.conn == nil {
+		if err := client.connect(); err != nil {
+			return err
+		}
+	}
+
+	if err := client.conn.Bind(bindDN, bindPassword); err != nil {
+		return fmt.Errorf("绑定失败: %v", err)
+	}
+
+	return nil
+}
+
+// close 关闭LDAP连接
+func (client *LDAPClient) close() {
+	if client.conn != nil {
+		client.conn.Close()
+		client.conn = nil
+	}
+}
+
+// bindWithRetry 带重试的LDAP绑定
+func (client *LDAPClient) bindWithRetry(bindDN, bindPassword string) error {
+	err := client.bind(bindDN, bindPassword)
+	if err != nil {
+		// 如果绑定失败，尝试重新连接一次
+		client.close()
+		if err := client.connect(); err != nil {
+			return fmt.Errorf("重新连接失败: %v", err)
+		}
+		// 重试绑定
+		if err := client.bind(bindDN, bindPassword); err != nil {
+			return fmt.Errorf("重新绑定失败: %v", err)
+		}
+	}
+	return nil
+}
+
+// testLDAPService 测试LDAP服务连通性
+func (client *LDAPClient) testLDAPService() bool {
+	defer client.close() // 确保连接最后被关闭
+
+	if err := client.bindWithRetry(client.bindDN, client.bindPassword); err != nil {
+		log.Printf("服务测试失败: %v", err)
 		return false
 	}
 
@@ -187,54 +275,12 @@ func (client *LDAPClient) testLDAPService() bool {
 	return true
 }
 
-// 添加常用LDAP过滤器结构
-type LDAPFilter struct {
-	name        string // 过滤器名称
-	pattern     string // 过滤器模式
-	description string // 过滤器描述
-}
-
-// 定义常用的LDAP过滤器
-var commonFilters = []LDAPFilter{
-	{
-		name:        "sAMAccountName",
-		pattern:     "(&(objectClass=user)(sAMAccountName=%s))",
-		description: "使用sAMAccountName搜索（AD默认）",
-	},
-	{
-		name:        "userPrincipalName",
-		pattern:     "(&(objectClass=user)(userPrincipalName=%s))",
-		description: "使用userPrincipalName搜索（邮箱格式）",
-	},
-	{
-		name:        "mail",
-		pattern:     "(&(objectClass=user)(mail=%s))",
-		description: "使用邮箱地址搜索",
-	},
-	{
-		name:        "uid",
-		pattern:     "(&(objectClass=user)(uid=%s))",
-		description: "使用uid搜索（OpenLDAP默认）",
-	},
-	{
-		name:        "cn",
-		pattern:     "(&(objectClass=user)(cn=%s))",
-		description: "使用cn（通用名称）搜索",
-	},
-}
-
 // testUserAuth 测试用户认证流程
 func (client *LDAPClient) testUserAuth(testUser, testPassword, searchDN, filterPattern string) bool {
-	url := fmt.Sprintf("ldap://%s:%d", client.host, client.port)
-	l, err := ldap.DialURL(url)
-	if err != nil {
-		log.Printf("连接失败: %v", err)
-		return false
-	}
-	defer l.Close()
+	defer client.close() // 确保连接最后被关闭
 
 	// 使用管理员凭证进行绑定
-	if err := l.Bind(client.bindDN, client.bindPassword); err != nil {
+	if err := client.bindWithRetry(client.bindDN, client.bindPassword); err != nil {
 		log.Printf("管理员绑定失败: %v", err)
 		return false
 	}
@@ -253,7 +299,7 @@ func (client *LDAPClient) testUserAuth(testUser, testPassword, searchDN, filterP
 		nil,
 	)
 
-	sr, err := l.Search(searchRequest)
+	sr, err := client.conn.Search(searchRequest)
 	if err != nil {
 		log.Printf("搜索失败: %v", err)
 		return false
@@ -268,7 +314,7 @@ func (client *LDAPClient) testUserAuth(testUser, testPassword, searchDN, filterP
 	log.Printf("找到用户DN: %s", userDN)
 
 	// 尝试使用用户凭证绑定
-	if err := l.Bind(userDN, testPassword); err != nil {
+	if err := client.bindWithRetry(userDN, testPassword); err != nil {
 		log.Printf("用户绑定失败: %v", err)
 		return false
 	}
@@ -338,16 +384,41 @@ func (client *LDAPClient) searchUserInDomain(username string) (bool, string) {
 	return false, ""
 }
 
+// 添加常用LDAP过滤器结构
+type LDAPFilter struct {
+	name    string // 过滤器名称
+	pattern string // 过滤器模式
+}
+
+// 定义常用的LDAP过滤器
+var commonFilters = []LDAPFilter{
+	{
+		name:    "使用sAMAccountName搜索（登录名）",
+		pattern: "(&(objectClass=user)(sAMAccountName=%s))",
+	},
+	{
+		name:    "使用userPrincipalName搜索（邮箱格式）",
+		pattern: "(&(objectClass=user)(userPrincipalName=%s))",
+	},
+	{
+		name:    "使用mail搜索（邮箱地址）",
+		pattern: "(&(objectClass=user)(mail=%s))",
+	},
+	{
+		name:    "使用uid搜索（OpenLDAP默认）",
+		pattern: "(&(objectClass=user)(uid=%s))",
+	},
+	{
+		name:    "使用cn搜索（通用名称）",
+		pattern: "(&(objectClass=user)(cn=%s))",
+	},
+}
+
 // ensureDNExists 递归检查/创建目标DN路径
 func (client *LDAPClient) ensureDNExists(targetDN string) error {
-	url := fmt.Sprintf("ldap://%s:%d", client.host, client.port)
-	l, err := ldap.DialURL(url)
-	if err != nil {
-		return fmt.Errorf("连接失败: %v", err)
-	}
-	defer l.Close()
+	defer client.close() // 确保连接最后被关闭
 
-	if err := l.Bind(client.bindDN, client.bindPassword); err != nil {
+	if err := client.bindWithRetry(client.bindDN, client.bindPassword); err != nil {
 		return fmt.Errorf("管理员绑定失败: %v", err)
 	}
 
@@ -374,7 +445,7 @@ func (client *LDAPClient) ensureDNExists(targetDN string) error {
 			nil,
 		)
 
-		_, err := l.Search(searchRequest)
+		_, err := client.conn.Search(searchRequest)
 		if err != nil {
 			// 如果搜索失败，尝试创建该层级
 			var addRequest *ldap.AddRequest
@@ -407,7 +478,7 @@ func (client *LDAPClient) ensureDNExists(targetDN string) error {
 			}
 
 			if addRequest != nil {
-				err = l.Add(addRequest)
+				err = client.conn.Add(addRequest)
 				if err != nil {
 					// 忽略"已存在"错误
 					if ldapErr, ok := err.(*ldap.Error); ok && ldapErr.ResultCode == ldap.LDAPResultEntryAlreadyExists {
@@ -426,24 +497,11 @@ func (client *LDAPClient) ensureDNExists(targetDN string) error {
 
 // moveUser 执行用户移动操作
 func (client *LDAPClient) moveUser(oldDN, newDN string) error {
+	defer client.close() // 确保连接最后被关闭
+
 	log.Printf("开始移动操作 | 源: %s -> 目标: %s", oldDN, newDN)
 
-	// 新增连接信息日志
-	log.Printf("连接信息 | 服务器: %s:%d | 绑定DN: %s",
-		client.host, client.port, client.bindDN)
-
-	url := fmt.Sprintf("ldap://%s:%d", client.host, client.port)
-	l, err := ldap.DialURL(url)
-	if err != nil {
-		log.Printf("连接失败 | 错误: %v | URL: %s", err, url)
-		return fmt.Errorf("连接失败: %v", err)
-	}
-	defer l.Close()
-
-	// 绑定操作添加日志
-	log.Printf("尝试绑定管理员账户 | DN: %s", client.bindDN)
-	if err := l.Bind(client.bindDN, client.bindPassword); err != nil {
-		log.Printf("绑定失败 | DN: %s | 错误: %v", client.bindDN, err)
+	if err := client.bindWithRetry(client.bindDN, client.bindPassword); err != nil {
 		return fmt.Errorf("管理员绑定失败: %v", err)
 	}
 
@@ -471,7 +529,7 @@ func (client *LDAPClient) moveUser(oldDN, newDN string) error {
 	log.Printf("执行ModifyDN请求 | 旧RDN: %s | 新RDN: %s | 新上级: %s",
 		oldDN, newRDN, newSuperior)
 
-	if err := l.ModifyDN(modifyDNRequest); err != nil {
+	if err := client.conn.ModifyDN(modifyDNRequest); err != nil {
 		log.Printf("ModifyDN操作失败 | 错误类型: %T | 详细错误: %+v", err, err)
 		if ldapErr, ok := err.(*ldap.Error); ok {
 			log.Printf("LDAP错误详情 | 代码: %d | 消息: %s | 匹配的DN: %s",
@@ -571,9 +629,14 @@ func main() {
 		}
 
 		// 创建 LDAP 客户端实例
+		port, err := portEntry.GetPort()
+		if err != nil {
+			dialog.ShowError(err, fyne.CurrentApp().Driver().AllWindows()[0])
+			return
+		}
 		client := LDAPClient{
 			host:         domainEntry.Text,
-			port:         port, // 使用已解析的端口值
+			port:         port,
 			bindDN:       adminEntry.Text,
 			bindPassword: passwordEntry.Text,
 			updateFunc:   updateStatus,
@@ -852,14 +915,16 @@ func main() {
 	filterSelect.SetSelected("sAMAccountName") // 设置默认选项
 
 	// 创建过滤器描述标签
-	filterDescription := widget.NewLabel("")
-	filterDescription.Wrapping = fyne.TextWrapWord
+	filterDescription := widget.NewEntry()
+	filterDescription.Disable() // 设置为只读，但允许选择和复制
 
 	// 更新过滤器描述的函数
 	updateFilterDescription := func(filterName string) {
 		for _, f := range commonFilters {
 			if f.name == filterName {
-				filterDescription.SetText(f.description)
+				filterDescription.Enable() // 临时启用以设置文本
+				filterDescription.SetText(f.pattern)
+				filterDescription.Disable() // 重新禁用以保持只读状态
 				break
 			}
 		}
@@ -947,13 +1012,10 @@ func main() {
 	// 端口测试按钮回调函数
 	portTestButton := widget.NewButton("端口测试", func() {
 		host := domainEntry.Text
-		port := 389 // 默认端口（仅在输入为空时使用）
-		if portEntry.Text != "" {
-			// 解析用户输入的端口号
-			if _, err := fmt.Sscanf(portEntry.Text, "%d", &port); err != nil {
-				updateStatus(fmt.Sprintf("错误：无效端口号 %s", portEntry.Text))
-				return
-			}
+		port, err := portEntry.GetPort()
+		if err != nil {
+			dialog.ShowError(err, fyne.CurrentApp().Driver().AllWindows()[0])
+			return
 		}
 
 		// 使用3秒超时进行TCP连接测试
@@ -997,21 +1059,18 @@ func main() {
 			return
 		}
 
-		// 解析端口号
-		var ldapPort int
-		if _, err := fmt.Sscanf(portEntry.Text, "%d", &ldapPort); err != nil || ldapPort < 1 || ldapPort > 65535 {
-			dialog.ShowError(fmt.Errorf("无效端口号：%s（必须是1-65535）", portEntry.Text), myWindow)
-			updateStatus(fmt.Sprintf("错误：无效端口号 %s", portEntry.Text))
+		// 创建LDAP客户端实例
+		port, err := portEntry.GetPort()
+		if err != nil {
+			dialog.ShowError(err, fyne.CurrentApp().Driver().AllWindows()[0])
 			return
 		}
-
-		// 创建LDAP客户端实例
 		client := LDAPClient{
 			host:         domainEntry.Text,
-			port:         ldapPort,
+			port:         port,
 			bindDN:       adminEntry.Text,
 			bindPassword: passwordEntry.Text,
-			updateFunc:   updateStatus, // 传递状态更新函数
+			updateFunc:   updateStatus,
 		}
 
 		// 分步骤测试
@@ -1039,14 +1098,12 @@ func main() {
 			return
 		}
 
-		// 解析端口号
-		var port int
-		if _, err := fmt.Sscanf(portEntry.Text, "%d", &port); err != nil {
-			updateStatus("无效的端口号")
+		// 创建 LDAP 客户端实例
+		port, err := portEntry.GetPort()
+		if err != nil {
+			dialog.ShowError(err, fyne.CurrentApp().Driver().AllWindows()[0])
 			return
 		}
-
-		// 创建 LDAP 客户端实例
 		client := LDAPClient{
 			host:         domainEntry.Text,
 			port:         port,
@@ -1200,12 +1257,6 @@ func main() {
 			return
 		}
 
-		var port int
-		if _, err := fmt.Sscanf(portEntry.Text, "%d", &port); err != nil {
-			dialog.ShowError(fmt.Errorf("无效端口号"), myWindow)
-			return
-		}
-
 		// 获取选定的过滤器模式
 		var filterPattern string
 		for _, f := range commonFilters {
@@ -1215,6 +1266,11 @@ func main() {
 			}
 		}
 
+		port, err := portEntry.GetPort()
+		if err != nil {
+			dialog.ShowError(err, fyne.CurrentApp().Driver().AllWindows()[0])
+			return
+		}
 		client := LDAPClient{
 			host:         domainEntry.Text,
 			port:         port,
@@ -1239,13 +1295,6 @@ func main() {
 			return
 		}
 
-		// 解析端口号
-		var port int
-		if _, err := fmt.Sscanf(portEntry.Text, "%d", &port); err != nil {
-			dialog.ShowError(fmt.Errorf("无效端口号"), myWindow)
-			return
-		}
-
 		// 获取选定的过滤器模式
 		var filterPattern string
 		for _, f := range commonFilters {
@@ -1256,6 +1305,11 @@ func main() {
 		}
 
 		// 创建LDAP客户端实例（使用LDAP账号凭证）
+		port, err := portEntry.GetPort()
+		if err != nil {
+			dialog.ShowError(err, fyne.CurrentApp().Driver().AllWindows()[0])
+			return
+		}
 		client := LDAPClient{
 			host:         domainEntry.Text,
 			port:         port,
@@ -1297,10 +1351,10 @@ func main() {
 			widget.NewCheck("SSL支持", func(checked bool) {
 				isSSLEnabled = checked // 更新全局SSL状态
 				if checked {
-					portEntry.SetText("636")                               // SSL端口
+					portEntry.SetDefaultPort(true)                         // SSL端口
 					ldappasswordEntry.SetPlaceHolder("SSL模式下创建的用户是可以直接用的") // 更新占位符提示
 				} else {
-					portEntry.SetText("389")                                 // 标准端口
+					portEntry.SetDefaultPort(false)                          // 标准端口
 					ldappasswordEntry.SetPlaceHolder("非SSL模式创建的用户是没有密码停用的）") // 更新占位符提示
 				}
 			}),
