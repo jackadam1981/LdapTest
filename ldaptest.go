@@ -4,6 +4,7 @@
 package main
 
 import (
+	"encoding/binary"
 	"fmt"
 	"image/color"
 	"log"
@@ -781,39 +782,149 @@ func main() {
 								log.Println("LDAP连接状态正常")
 							}
 
-							// 1. 获取组的 SID
-							log.Printf("开始获取组SID | DN: %s", foundGroupDN)
-							searchRequest = ldap.NewSearchRequest(
-								foundGroupDN,
-								ldap.ScopeBaseObject,
-								ldap.NeverDerefAliases,
-								0, 0, false,
-								"(objectClass=group)",
-								[]string{"objectSid", "nTSecurityDescriptor"},
-								nil,
-							)
+							// 1. 获取组的objectSid
+							log.Printf("开始查找组 | DN: %s", ldapGroupEntry.Text)
 
-							sr, err := l.Search(searchRequest)
-							if err != nil {
-								log.Printf("获取组SID失败 | 错误类型: %T | 错误: %v", err, err)
-								if ldapErr, ok := err.(*ldap.Error); ok {
-									log.Printf("LDAP错误详情 | 代码: %d | 消息: %s", ldapErr.ResultCode, ldapErr.Err.Error())
+							var groupResult *ldap.SearchResult
+							var searchErr error
+							maxRetries := 3
+							var activeConn *ldap.Conn // 添加活动连接变量
+
+							for attempt := 1; attempt <= maxRetries; attempt++ {
+								if l == nil || attempt > 1 {
+									log.Printf("尝试重新建立连接 (尝试 %d/%d)...", attempt, maxRetries)
+									var connErr error
+									activeConn, connErr = ldap.DialURL(fmt.Sprintf("ldap://%s:%d", client.host, client.port))
+									if connErr != nil {
+										log.Printf("连接失败: %v", connErr)
+										continue
+									}
+
+									if bindErr := activeConn.Bind(client.bindDN, client.bindPassword); bindErr != nil {
+										log.Printf("绑定失败: %v", bindErr)
+										activeConn.Close()
+										activeConn = nil
+										continue
+									}
+								} else {
+									activeConn = l // 如果是第一次尝试，使用现有连接
 								}
-								dialog.ShowError(fmt.Errorf("获取组SID失败: %v", err), myWindow)
-								updateStatus("重新授权失败：无法获取组SID")
-								return
+
+								groupSearchRequest := ldap.NewSearchRequest(
+									ldapGroupEntry.Text,
+									ldap.ScopeBaseObject,
+									ldap.NeverDerefAliases,
+									0, 0, false,
+									"(objectClass=group)",
+									[]string{"objectSid", "cn", "distinguishedName"},
+									nil,
+								)
+
+								groupResult, searchErr = activeConn.Search(groupSearchRequest)
+								if searchErr != nil {
+									log.Printf("搜索组失败 (尝试 %d/%d) | 错误: %v", attempt, maxRetries, searchErr)
+									if ldapErr, ok := searchErr.(*ldap.Error); ok {
+										log.Printf("LDAP错误详情 | 代码: %d | 消息: %s", ldapErr.ResultCode, ldapErr.Err.Error())
+										// 如果是网络错误，关闭连接并重试
+										if ldapErr.ResultCode == 200 {
+											if activeConn != l { // 只关闭新建的连接
+												activeConn.Close()
+											}
+											activeConn = nil
+											continue
+										}
+									}
+									// 其他错误，尝试在整个域中搜索
+									break
+								}
+								// 搜索成功，跳出重试循环
+								break
 							}
 
-							if len(sr.Entries) == 0 {
-								log.Printf("未找到组 | DN: %s", foundGroupDN)
-								updateStatus("重新授权失败：找不到组")
-								return
-							}
+							// 如果直接搜索失败，尝试在整个域中搜索
+							if searchErr != nil || len(groupResult.Entries) == 0 {
+								log.Printf("未找到组或搜索失败 | DN: %s", ldapGroupEntry.Text)
+								// 尝试在整个域中搜索组
+								domainDN := strings.Join(strings.Split(client.host, "."), ",DC=")
+								domainDN = "DC=" + domainDN
+								log.Printf("在整个域中搜索组 | 基准DN: %s", domainDN)
 
-							log.Printf("成功获取组信息 | 条目数: %d", len(sr.Entries))
+								// 从组DN中提取CN
+								groupCN := strings.Split(ldapGroupEntry.Text, ",")[0]
+								if strings.HasPrefix(groupCN, "CN=") {
+									groupCN = strings.TrimPrefix(groupCN, "CN=")
+								}
+
+								broadSearchRequest := ldap.NewSearchRequest(
+									domainDN,
+									ldap.ScopeWholeSubtree,
+									ldap.NeverDerefAliases,
+									0, 0, false,
+									fmt.Sprintf("(&(objectClass=group)(cn=%s))", ldap.EscapeFilter(groupCN)),
+									[]string{"objectSid", "distinguishedName"},
+									nil,
+								)
+
+								for attempt := 1; attempt <= maxRetries; attempt++ {
+									if activeConn == nil || attempt > 1 {
+										log.Printf("尝试重新建立连接进行域搜索 (尝试 %d/%d)...", attempt, maxRetries)
+										var connErr error
+										activeConn, connErr = ldap.DialURL(fmt.Sprintf("ldap://%s:%d", client.host, client.port))
+										if connErr != nil {
+											log.Printf("连接失败: %v", connErr)
+											continue
+										}
+
+										if bindErr := activeConn.Bind(client.bindDN, client.bindPassword); bindErr != nil {
+											log.Printf("绑定失败: %v", bindErr)
+											activeConn.Close()
+											activeConn = nil
+											continue
+										}
+									}
+
+									groupResult, searchErr = activeConn.Search(broadSearchRequest)
+									if searchErr != nil {
+										log.Printf("域搜索失败 (尝试 %d/%d) | 错误: %v", attempt, maxRetries, searchErr)
+										if ldapErr, ok := searchErr.(*ldap.Error); ok && ldapErr.ResultCode == 200 {
+											if activeConn != l { // 只关闭新建的连接
+												activeConn.Close()
+											}
+											activeConn = nil
+											continue
+										}
+										// 其他错误直接跳出
+										break
+									}
+									// 搜索成功，跳出重试循环
+									break
+								}
+
+								if searchErr != nil {
+									log.Printf("域范围搜索失败 | 错误: %v", searchErr)
+									updateStatus(fmt.Sprintf("在域中搜索组失败: %v", searchErr))
+									if activeConn != nil && activeConn != l {
+										activeConn.Close()
+									}
+									return
+								}
+
+								if len(groupResult.Entries) == 0 {
+									updateStatus("在整个域中都未找到指定的组，请确认组是否存在")
+									if activeConn != nil && activeConn != l {
+										activeConn.Close()
+									}
+									return
+								}
+
+								// 找到组，更新组DN
+								foundGroupDN := groupResult.Entries[0].DN
+								log.Printf("找到组 | DN: %s", foundGroupDN)
+								ldapGroupEntry.SetText(foundGroupDN)
+							}
 
 							// 2. 创建修改请求
-							modifyRequest := ldap.NewModifyRequest(foundGroupDN, nil)
+							modifyRequest := ldap.NewModifyRequest(ldapGroupEntry.Text, nil)
 
 							// 3. 设置组类型为全局安全组
 							modifyRequest.Replace("groupType", []string{"-2147483646"})
@@ -822,8 +933,8 @@ func main() {
 							modifyRequest.Replace("description", []string{"LDAP Authentication Group"})
 
 							// 执行修改
-							log.Printf("执行修改请求 | DN: %s | 属性数: %d", foundGroupDN, len(modifyRequest.Changes))
-							if err := l.Modify(modifyRequest); err != nil {
+							log.Printf("执行修改请求 | DN: %s | 属性数: %d", ldapGroupEntry.Text, len(modifyRequest.Changes))
+							if err := activeConn.Modify(modifyRequest); err != nil {
 								log.Printf("重新授权失败 | 错误类型: %T | 详细错误: %v", err, err)
 								if ldapErr, ok := err.(*ldap.Error); ok {
 									log.Printf("LDAP错误详情 | 代码: %d | 消息: %s | 匹配的DN: %s",
@@ -832,8 +943,13 @@ func main() {
 								dialog.ShowError(fmt.Errorf("重新授权失败: %v", err), myWindow)
 								updateStatus("组重新授权失败")
 							} else {
-								log.Printf("重新授权成功 | DN: %s", foundGroupDN)
-								updateStatus(fmt.Sprintf("组重新授权成功：%s", foundGroupDN))
+								log.Printf("重新授权成功 | DN: %s", ldapGroupEntry.Text)
+								updateStatus(fmt.Sprintf("组重新授权成功：%s", ldapGroupEntry.Text))
+							}
+
+							// 最后清理连接
+							if activeConn != nil && activeConn != l {
+								activeConn.Close()
 							}
 						} else {
 							updateStatus("保持现有组权限不变：" + foundGroupDN)
@@ -1175,14 +1291,192 @@ func main() {
 
 			// 当DN完全相同时（不区分大小写）
 			if strings.EqualFold(strings.ToLower(foundUserDN), strings.ToLower(ldapDNEntry.Text)) {
-				dialog.ShowError(fmt.Errorf("用户已存在且位置相同：%s", foundUserDN), myWindow)
-				updateStatus("用户已存在且位置相同")
+				// 提示是否更新用户权限
+				dialog.ShowConfirm("用户已存在",
+					fmt.Sprintf("用户已存在且位置相同：\n%s\n\n是否要更新用户的权限组设置？", foundUserDN),
+					func(update bool) {
+						if update {
+							updateStatus("开始更新用户权限组设置...")
+
+							// 1. 获取组的objectSid
+							log.Printf("开始查找组 | DN: %s", ldapGroupEntry.Text)
+
+							var groupResult *ldap.SearchResult
+							var searchErr error
+							maxRetries := 3
+							var activeConn *ldap.Conn // 添加活动连接变量
+
+							for attempt := 1; attempt <= maxRetries; attempt++ {
+								if l == nil || attempt > 1 {
+									log.Printf("尝试重新建立连接 (尝试 %d/%d)...", attempt, maxRetries)
+									var connErr error
+									activeConn, connErr = ldap.DialURL(fmt.Sprintf("ldap://%s:%d", client.host, client.port))
+									if connErr != nil {
+										log.Printf("连接失败: %v", connErr)
+										continue
+									}
+
+									if bindErr := activeConn.Bind(client.bindDN, client.bindPassword); bindErr != nil {
+										log.Printf("绑定失败: %v", bindErr)
+										activeConn.Close()
+										activeConn = nil
+										continue
+									}
+								} else {
+									activeConn = l // 如果是第一次尝试，使用现有连接
+								}
+
+								groupSearchRequest := ldap.NewSearchRequest(
+									ldapGroupEntry.Text,
+									ldap.ScopeBaseObject,
+									ldap.NeverDerefAliases,
+									0, 0, false,
+									"(objectClass=group)",
+									[]string{"objectSid", "cn", "distinguishedName"},
+									nil,
+								)
+
+								groupResult, searchErr = activeConn.Search(groupSearchRequest)
+								if searchErr != nil {
+									log.Printf("搜索组失败 (尝试 %d/%d) | 错误: %v", attempt, maxRetries, searchErr)
+									if ldapErr, ok := searchErr.(*ldap.Error); ok {
+										log.Printf("LDAP错误详情 | 代码: %d | 消息: %s", ldapErr.ResultCode, ldapErr.Err.Error())
+										// 如果是网络错误，关闭连接并重试
+										if ldapErr.ResultCode == 200 {
+											if activeConn != l { // 只关闭新建的连接
+												activeConn.Close()
+											}
+											activeConn = nil
+											continue
+										}
+									}
+									// 其他错误，尝试在整个域中搜索
+									break
+								}
+								// 搜索成功，跳出重试循环
+								break
+							}
+
+							// 如果直接搜索失败，尝试在整个域中搜索
+							if searchErr != nil || len(groupResult.Entries) == 0 {
+								log.Printf("未找到组或搜索失败 | DN: %s", ldapGroupEntry.Text)
+								// 尝试在整个域中搜索组
+								domainDN := strings.Join(strings.Split(client.host, "."), ",DC=")
+								domainDN = "DC=" + domainDN
+								log.Printf("在整个域中搜索组 | 基准DN: %s", domainDN)
+
+								// 从组DN中提取CN
+								groupCN := strings.Split(ldapGroupEntry.Text, ",")[0]
+								if strings.HasPrefix(groupCN, "CN=") {
+									groupCN = strings.TrimPrefix(groupCN, "CN=")
+								}
+
+								broadSearchRequest := ldap.NewSearchRequest(
+									domainDN,
+									ldap.ScopeWholeSubtree,
+									ldap.NeverDerefAliases,
+									0, 0, false,
+									fmt.Sprintf("(&(objectClass=group)(cn=%s))", ldap.EscapeFilter(groupCN)),
+									[]string{"objectSid", "distinguishedName"},
+									nil,
+								)
+
+								for attempt := 1; attempt <= maxRetries; attempt++ {
+									if activeConn == nil || attempt > 1 {
+										log.Printf("尝试重新建立连接进行域搜索 (尝试 %d/%d)...", attempt, maxRetries)
+										var connErr error
+										activeConn, connErr = ldap.DialURL(fmt.Sprintf("ldap://%s:%d", client.host, client.port))
+										if connErr != nil {
+											log.Printf("连接失败: %v", connErr)
+											continue
+										}
+
+										if bindErr := activeConn.Bind(client.bindDN, client.bindPassword); bindErr != nil {
+											log.Printf("绑定失败: %v", bindErr)
+											activeConn.Close()
+											activeConn = nil
+											continue
+										}
+									}
+
+									groupResult, searchErr = activeConn.Search(broadSearchRequest)
+									if searchErr != nil {
+										log.Printf("域搜索失败 (尝试 %d/%d) | 错误: %v", attempt, maxRetries, searchErr)
+										if ldapErr, ok := searchErr.(*ldap.Error); ok && ldapErr.ResultCode == 200 {
+											if activeConn != l { // 只关闭新建的连接
+												activeConn.Close()
+											}
+											activeConn = nil
+											continue
+										}
+										// 其他错误直接跳出
+										break
+									}
+									// 搜索成功，跳出重试循环
+									break
+								}
+
+								if searchErr != nil {
+									log.Printf("域范围搜索失败 | 错误: %v", searchErr)
+									updateStatus(fmt.Sprintf("在域中搜索组失败: %v", searchErr))
+									if activeConn != nil && activeConn != l {
+										activeConn.Close()
+									}
+									return
+								}
+
+								if len(groupResult.Entries) == 0 {
+									updateStatus("在整个域中都未找到指定的组，请确认组是否存在")
+									if activeConn != nil && activeConn != l {
+										activeConn.Close()
+									}
+									return
+								}
+
+								// 找到组，更新组DN
+								foundGroupDN := groupResult.Entries[0].DN
+								log.Printf("找到组 | DN: %s", foundGroupDN)
+								ldapGroupEntry.SetText(foundGroupDN)
+							}
+
+							// 2. 创建修改请求
+							modifyRequest := ldap.NewModifyRequest(ldapGroupEntry.Text, nil)
+
+							// 3. 设置组类型为全局安全组
+							modifyRequest.Replace("groupType", []string{"-2147483646"})
+
+							// 4. 更新组描述
+							modifyRequest.Replace("description", []string{"LDAP Authentication Group"})
+
+							// 执行修改
+							log.Printf("执行修改请求 | DN: %s | 属性数: %d", ldapGroupEntry.Text, len(modifyRequest.Changes))
+							if err := activeConn.Modify(modifyRequest); err != nil {
+								log.Printf("重新授权失败 | 错误类型: %T | 详细错误: %v", err, err)
+								if ldapErr, ok := err.(*ldap.Error); ok {
+									log.Printf("LDAP错误详情 | 代码: %d | 消息: %s | 匹配的DN: %s",
+										ldapErr.ResultCode, ldapErr.Err.Error(), ldapErr.MatchedDN)
+								}
+								dialog.ShowError(fmt.Errorf("重新授权失败: %v", err), myWindow)
+								updateStatus("组重新授权失败")
+							} else {
+								log.Printf("重新授权成功 | DN: %s", ldapGroupEntry.Text)
+								updateStatus(fmt.Sprintf("组重新授权成功：%s", ldapGroupEntry.Text))
+							}
+
+							// 最后清理连接
+							if activeConn != nil && activeConn != l {
+								activeConn.Close()
+							}
+						} else {
+							updateStatus("保持用户现有权限不变")
+						}
+					}, myWindow)
 				return
 			}
 
 			// 提示是否移动用户
 			dialog.ShowConfirm("用户已存在",
-				fmt.Sprintf("发现同名用户：\n%s\n\n当前输入位置：\n%s\n\n是否要移动用户？",
+				fmt.Sprintf("发现同名用户：\n%s\n\n当前输入位置：\n%s\n\n是否要移动用户并更新权限组？",
 					foundUserDN,
 					ldapDNEntry.Text),
 				func(move bool) {
@@ -1195,11 +1489,202 @@ func main() {
 								err, foundUserDN, ldapDNEntry.Text)
 							dialog.ShowError(fmt.Errorf("移动失败: %v", err), myWindow)
 							updateStatus("用户移动失败")
-						} else {
-							log.Printf("用户移动成功 | 新位置: %s", ldapDNEntry.Text)
-							updateStatus("用户移动成功")
-							ldapDNEntry.SetText(ldapDNEntry.Text) // 保持新位置
+							return
 						}
+
+						log.Printf("用户移动成功 | 新位置: %s", ldapDNEntry.Text)
+						updateStatus("用户移动成功，开始更新权限组...")
+
+						// 移动成功后更新权限组
+						// 1. 获取组的objectSid
+						log.Printf("开始查找组 | DN: %s", ldapGroupEntry.Text)
+
+						var groupResult *ldap.SearchResult
+						var searchErr error
+						maxRetries := 3
+						var activeConn *ldap.Conn // 添加活动连接变量
+
+						for attempt := 1; attempt <= maxRetries; attempt++ {
+							if l == nil || attempt > 1 {
+								log.Printf("尝试重新建立连接 (尝试 %d/%d)...", attempt, maxRetries)
+								var connErr error
+								activeConn, connErr = ldap.DialURL(fmt.Sprintf("ldap://%s:%d", client.host, client.port))
+								if connErr != nil {
+									log.Printf("连接失败: %v", connErr)
+									continue
+								}
+
+								if bindErr := activeConn.Bind(client.bindDN, client.bindPassword); bindErr != nil {
+									log.Printf("绑定失败: %v", bindErr)
+									activeConn.Close()
+									activeConn = nil
+									continue
+								}
+							} else {
+								activeConn = l // 如果是第一次尝试，使用现有连接
+							}
+
+							groupSearchRequest := ldap.NewSearchRequest(
+								ldapGroupEntry.Text,
+								ldap.ScopeBaseObject,
+								ldap.NeverDerefAliases,
+								0, 0, false,
+								"(objectClass=group)",
+								[]string{"objectSid", "cn", "distinguishedName"},
+								nil,
+							)
+
+							groupResult, searchErr = activeConn.Search(groupSearchRequest)
+							if searchErr != nil {
+								log.Printf("搜索组失败 (尝试 %d/%d) | 错误: %v", attempt, maxRetries, searchErr)
+								if ldapErr, ok := searchErr.(*ldap.Error); ok {
+									log.Printf("LDAP错误详情 | 代码: %d | 消息: %s", ldapErr.ResultCode, ldapErr.Err.Error())
+									// 如果是网络错误，关闭连接并重试
+									if ldapErr.ResultCode == 200 {
+										if activeConn != l { // 只关闭新建的连接
+											activeConn.Close()
+										}
+										activeConn = nil
+										continue
+									}
+								}
+								// 其他错误，尝试在整个域中搜索
+								break
+							}
+							// 搜索成功，跳出重试循环
+							break
+						}
+
+						// 如果直接搜索失败，尝试在整个域中搜索
+						if searchErr != nil || len(groupResult.Entries) == 0 {
+							log.Printf("未找到组或搜索失败 | DN: %s", ldapGroupEntry.Text)
+							// 尝试在整个域中搜索组
+							domainDN := strings.Join(strings.Split(client.host, "."), ",DC=")
+							domainDN = "DC=" + domainDN
+							log.Printf("在整个域中搜索组 | 基准DN: %s", domainDN)
+
+							// 从组DN中提取CN
+							groupCN := strings.Split(ldapGroupEntry.Text, ",")[0]
+							if strings.HasPrefix(groupCN, "CN=") {
+								groupCN = strings.TrimPrefix(groupCN, "CN=")
+							}
+
+							broadSearchRequest := ldap.NewSearchRequest(
+								domainDN,
+								ldap.ScopeWholeSubtree,
+								ldap.NeverDerefAliases,
+								0, 0, false,
+								fmt.Sprintf("(&(objectClass=group)(cn=%s))", ldap.EscapeFilter(groupCN)),
+								[]string{"objectSid", "distinguishedName"},
+								nil,
+							)
+
+							for attempt := 1; attempt <= maxRetries; attempt++ {
+								if activeConn == nil || attempt > 1 {
+									log.Printf("尝试重新建立连接进行域搜索 (尝试 %d/%d)...", attempt, maxRetries)
+									var connErr error
+									activeConn, connErr = ldap.DialURL(fmt.Sprintf("ldap://%s:%d", client.host, client.port))
+									if connErr != nil {
+										log.Printf("连接失败: %v", connErr)
+										continue
+									}
+
+									if bindErr := activeConn.Bind(client.bindDN, client.bindPassword); bindErr != nil {
+										log.Printf("绑定失败: %v", bindErr)
+										activeConn.Close()
+										activeConn = nil
+										continue
+									}
+								}
+
+								groupResult, searchErr = activeConn.Search(broadSearchRequest)
+								if searchErr != nil {
+									log.Printf("域搜索失败 (尝试 %d/%d) | 错误: %v", attempt, maxRetries, searchErr)
+									if ldapErr, ok := searchErr.(*ldap.Error); ok && ldapErr.ResultCode == 200 {
+										if activeConn != l { // 只关闭新建的连接
+											activeConn.Close()
+										}
+										activeConn = nil
+										continue
+									}
+									// 其他错误直接跳出
+									break
+								}
+								// 搜索成功，跳出重试循环
+								break
+							}
+
+							if searchErr != nil {
+								log.Printf("域范围搜索失败 | 错误: %v", searchErr)
+								updateStatus(fmt.Sprintf("在域中搜索组失败: %v", searchErr))
+								if activeConn != nil && activeConn != l {
+									activeConn.Close()
+								}
+								return
+							}
+
+							if len(groupResult.Entries) == 0 {
+								updateStatus("在整个域中都未找到指定的组，请确认组是否存在")
+								if activeConn != nil && activeConn != l {
+									activeConn.Close()
+								}
+								return
+							}
+
+							// 找到组，更新组DN
+							foundGroupDN := groupResult.Entries[0].DN
+							log.Printf("找到组 | DN: %s", foundGroupDN)
+							ldapGroupEntry.SetText(foundGroupDN)
+						}
+
+						// 2. 修改用户的primaryGroupID
+						modifyRequest := ldap.NewModifyRequest(ldapDNEntry.Text, nil)
+						modifyRequest.Replace("primaryGroupID", []string{fmt.Sprintf("%d", binary.LittleEndian.Uint32(groupResult.Entries[0].GetRawAttributeValue("objectSid")[:4]))})
+
+						if err := activeConn.Modify(modifyRequest); err != nil {
+							updateStatus(fmt.Sprintf("设置主要组失败: %v", err))
+							return
+						}
+
+						// 4. 将用户添加到新组的member属性中
+						groupModifyRequest := ldap.NewModifyRequest(ldapGroupEntry.Text, nil)
+						groupModifyRequest.Add("member", []string{ldapDNEntry.Text})
+
+						if err := activeConn.Modify(groupModifyRequest); err != nil {
+							// 忽略"已存在"错误
+							if ldapErr, ok := err.(*ldap.Error); !ok || ldapErr.ResultCode != ldap.LDAPResultEntryAlreadyExists {
+								updateStatus(fmt.Sprintf("添加用户到组失败: %v", err))
+								return
+							}
+						}
+
+						// 5. 移除用户的其他组成员身份
+						userSearchRequest := ldap.NewSearchRequest(
+							ldapDNEntry.Text,
+							ldap.ScopeBaseObject,
+							ldap.NeverDerefAliases,
+							0, 0, false,
+							"(objectClass=user)",
+							[]string{"memberOf"},
+							nil,
+						)
+
+						userResult, err := activeConn.Search(userSearchRequest)
+						if err == nil && len(userResult.Entries) > 0 {
+							for _, group := range userResult.Entries[0].GetAttributeValues("memberOf") {
+								if group != ldapGroupEntry.Text {
+									removeGroupRequest := ldap.NewModifyRequest(group, nil)
+									removeGroupRequest.Delete("member", []string{ldapDNEntry.Text})
+									if err := activeConn.Modify(removeGroupRequest); err != nil {
+										updateStatus(fmt.Sprintf("从组 %s 移除用户失败: %v", group, err))
+									} else {
+										updateStatus(fmt.Sprintf("已从组 %s 移除用户", group))
+									}
+								}
+							}
+						}
+
+						updateStatus("用户移动和权限组设置完成")
 					} else {
 						// 自动填充查询到的用户位置
 						ldapDNEntry.SetText(foundUserDN)
