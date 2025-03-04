@@ -134,6 +134,11 @@ type LDAPClient struct {
 	updateFunc   func(string) // 添加状态更新函数引用
 }
 
+// 全局变量
+var (
+	isSSLEnabled bool // SSL支持状态
+)
+
 // encodePassword 将密码编码为Active Directory所需的格式
 func encodePassword(password string) string {
 	// Active Directory需要UTF-16LE编码的密码，并用双引号包围
@@ -953,8 +958,12 @@ func main() {
 	// 创建LDAP账号按钮回调函数
 	createLdapButton := widget.NewButton("创建LDAP账号", func() {
 		// 输入验证
-		if ldapDNEntry.Text == "" || ldappasswordEntry.Text == "" {
-			dialog.ShowError(fmt.Errorf("LDAP DN和密码不能为空"), myWindow)
+		if ldapDNEntry.Text == "" {
+			dialog.ShowError(fmt.Errorf("LDAP DN不能为空"), myWindow)
+			return
+		}
+		if isSSLEnabled && ldappasswordEntry.Text == "" {
+			dialog.ShowError(fmt.Errorf("SSL模式下LDAP密码不能为空"), myWindow)
 			return
 		}
 
@@ -1201,7 +1210,19 @@ func main() {
 		container.NewBorder(nil, nil, makeLabel("服务器地址:"), pingButton,
 			domainEntry,
 		),
-		container.NewBorder(nil, nil, makeLabel("服务器端口:"), portTestButton,
+		container.NewBorder(nil, nil, makeLabel("服务器端口:"), container.NewHBox(
+			widget.NewCheck("SSL支持", func(checked bool) {
+				isSSLEnabled = checked // 更新全局SSL状态
+				if checked {
+					portEntry.SetText("636")                               // SSL端口
+					ldappasswordEntry.SetPlaceHolder("SSL模式下创建的用户是可以直接用的") // 更新占位符提示
+				} else {
+					portEntry.SetText("389")                                 // 标准端口
+					ldappasswordEntry.SetPlaceHolder("非SSL模式创建的用户是没有密码停用的）") // 更新占位符提示
+				}
+			}),
+			portTestButton,
+		),
 			portEntry,
 		),
 		container.NewBorder(nil, nil, makeLabel("Admin DN:"), nil,
