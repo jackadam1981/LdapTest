@@ -187,62 +187,93 @@ func (client *LDAPClient) testLDAPService() bool {
 	return true
 }
 
+// 添加常用LDAP过滤器结构
+type LDAPFilter struct {
+	name        string // 过滤器名称
+	pattern     string // 过滤器模式
+	description string // 过滤器描述
+}
+
+// 定义常用的LDAP过滤器
+var commonFilters = []LDAPFilter{
+	{
+		name:        "sAMAccountName",
+		pattern:     "(&(objectClass=user)(sAMAccountName=%s))",
+		description: "使用sAMAccountName搜索（AD默认）",
+	},
+	{
+		name:        "userPrincipalName",
+		pattern:     "(&(objectClass=user)(userPrincipalName=%s))",
+		description: "使用userPrincipalName搜索（邮箱格式）",
+	},
+	{
+		name:        "mail",
+		pattern:     "(&(objectClass=user)(mail=%s))",
+		description: "使用邮箱地址搜索",
+	},
+	{
+		name:        "uid",
+		pattern:     "(&(objectClass=user)(uid=%s))",
+		description: "使用uid搜索（OpenLDAP默认）",
+	},
+	{
+		name:        "cn",
+		pattern:     "(&(objectClass=user)(cn=%s))",
+		description: "使用cn（通用名称）搜索",
+	},
+}
+
 // testUserAuth 测试用户认证流程
-// 参数：
-//
-//	testUser - 要测试的用户名
-//	testPassword - 测试用户的密码
-//	searchDN - 用户搜索的基准DN
-//
-// 返回值：bool - true表示认证成功，false表示失败
-func (client *LDAPClient) testUserAuth(testUser, testPassword, searchDN string) bool {
-	// 建立LDAP连接（同上）
+func (client *LDAPClient) testUserAuth(testUser, testPassword, searchDN, filterPattern string) bool {
 	url := fmt.Sprintf("ldap://%s:%d", client.host, client.port)
 	l, err := ldap.DialURL(url)
 	if err != nil {
-		log.Println("连接失败:", err)
+		log.Printf("连接失败: %v", err)
 		return false
 	}
 	defer l.Close()
 
 	// 使用管理员凭证进行绑定
 	if err := l.Bind(client.bindDN, client.bindPassword); err != nil {
-		log.Println("管理员绑定失败:", err)
+		log.Printf("管理员绑定失败: %v", err)
 		return false
 	}
 
-	// 使用sAMAccountName进行AD兼容查询
+	// 使用选定的过滤器进行查询
+	searchFilter := fmt.Sprintf(filterPattern, ldap.EscapeFilter(testUser))
+	log.Printf("使用过滤器搜索: %s", searchFilter)
+
 	searchRequest := ldap.NewSearchRequest(
 		searchDN,
 		ldap.ScopeWholeSubtree,
 		ldap.NeverDerefAliases,
 		0, 0, false,
-		fmt.Sprintf("(sAMAccountName=%s)", testUser), // AD专用属性
+		searchFilter,
 		[]string{"dn"},
 		nil,
 	)
 
-	// 执行搜索
 	sr, err := l.Search(searchRequest)
 	if err != nil {
-		log.Println("搜索失败:", err)
+		log.Printf("搜索失败: %v", err)
 		return false
 	}
 
-	// 验证搜索结果数量
 	if len(sr.Entries) != 1 {
-		log.Println("用户不存在或返回多个结果")
+		log.Printf("用户搜索结果数量异常: %d", len(sr.Entries))
 		return false
 	}
 
-	// 使用找到的用户DN进行绑定测试
 	userDN := sr.Entries[0].DN
+	log.Printf("找到用户DN: %s", userDN)
+
+	// 尝试使用用户凭证绑定
 	if err := l.Bind(userDN, testPassword); err != nil {
-		log.Println("用户绑定失败:", err)
+		log.Printf("用户绑定失败: %v", err)
 		return false
 	}
 
-	log.Println("用户认证成功")
+	log.Printf("用户认证成功")
 	return true
 }
 
@@ -797,7 +828,38 @@ func main() {
 		updateStatus(fmt.Sprintf("成功创建新组: %s", ldapGroupEntry.Text))
 	})
 
-	// 创建过滤器输入框（用于用户搜索的过滤条件）
+	// 创建过滤器选择框
+	filterSelect := widget.NewSelect(
+		func() []string {
+			var names []string
+			for _, f := range commonFilters {
+				names = append(names, f.name)
+			}
+			return names
+		}(),
+		nil,
+	)
+	filterSelect.SetSelected("sAMAccountName") // 设置默认选项
+
+	// 创建过滤器描述标签
+	filterDescription := widget.NewLabel("")
+	filterDescription.Wrapping = fyne.TextWrapWord
+
+	// 更新过滤器描述的函数
+	updateFilterDescription := func(filterName string) {
+		for _, f := range commonFilters {
+			if f.name == filterName {
+				filterDescription.SetText(f.description)
+				break
+			}
+		}
+	}
+
+	// 设置选择框回调
+	filterSelect.OnChanged = updateFilterDescription
+	updateFilterDescription("sAMAccountName") // 初始化描述
+
+	// 创建过滤器输入框
 	filterDNEntry := widget.NewEntry()
 	filterDNEntry.SetPlaceHolder("请输入过滤器")
 	filterDNEntry.SetText("(&(objectclass=user)(uid={%s}))") // 默认过滤器模板
@@ -1123,32 +1185,36 @@ func main() {
 
 	// 管理员验证用户按钮回调函数
 	adminTestUserButton := widget.NewButton("admin账号验证用户", func() {
-		// 输入验证
 		if testUserEntry.Text == "" || testPasswordEntry.Text == "" {
 			updateStatus("请输入测试用户名和密码")
 			return
 		}
 
-		// 解析端口号
-		port := 389
-		if portEntry.Text != "" {
-			if _, err := fmt.Sscanf(portEntry.Text, "%d", &port); err != nil {
-				dialog.ShowError(fmt.Errorf("无效端口号"), myWindow)
-				return
+		var port int
+		if _, err := fmt.Sscanf(portEntry.Text, "%d", &port); err != nil {
+			dialog.ShowError(fmt.Errorf("无效端口号"), myWindow)
+			return
+		}
+
+		// 获取选定的过滤器模式
+		var filterPattern string
+		for _, f := range commonFilters {
+			if f.name == filterSelect.Selected {
+				filterPattern = f.pattern
+				break
 			}
 		}
 
-		// 创建LDAP客户端实例
 		client := LDAPClient{
 			host:         domainEntry.Text,
 			port:         port,
 			bindDN:       adminEntry.Text,
 			bindPassword: passwordEntry.Text,
-			updateFunc:   updateStatus, // 传递状态更新函数
+			updateFunc:   updateStatus,
 		}
 
-		// 执行用户认证测试
-		if client.testUserAuth(testUserEntry.Text, testPasswordEntry.Text, searchDNEntry.Text) {
+		updateStatus(fmt.Sprintf("使用 %s 过滤器开始验证用户...", filterSelect.Selected))
+		if client.testUserAuth(testUserEntry.Text, testPasswordEntry.Text, searchDNEntry.Text, filterPattern) {
 			updateStatus("测试用户验证成功")
 		} else {
 			updateStatus("测试用户验证失败")
@@ -1164,11 +1230,18 @@ func main() {
 		}
 
 		// 解析端口号
-		port := 389
-		if portEntry.Text != "" {
-			if _, err := fmt.Sscanf(portEntry.Text, "%d", &port); err != nil {
-				dialog.ShowError(fmt.Errorf("无效端口号"), myWindow)
-				return
+		var port int
+		if _, err := fmt.Sscanf(portEntry.Text, "%d", &port); err != nil {
+			dialog.ShowError(fmt.Errorf("无效端口号"), myWindow)
+			return
+		}
+
+		// 获取选定的过滤器模式
+		var filterPattern string
+		for _, f := range commonFilters {
+			if f.name == filterSelect.Selected {
+				filterPattern = f.pattern
+				break
 			}
 		}
 
@@ -1178,11 +1251,11 @@ func main() {
 			port:         port,
 			bindDN:       ldapDNEntry.Text,
 			bindPassword: ldappasswordEntry.Text,
-			updateFunc:   updateStatus, // 传递状态更新函数
+			updateFunc:   updateStatus,
 		}
 
-		// 执行用户认证测试
-		if client.testUserAuth(testUserEntry.Text, testPasswordEntry.Text, searchDNEntry.Text) {
+		updateStatus(fmt.Sprintf("使用 %s 过滤器开始验证用户...", filterSelect.Selected))
+		if client.testUserAuth(testUserEntry.Text, testPasswordEntry.Text, searchDNEntry.Text, filterPattern) {
 			updateStatus("测试用户验证成功")
 		} else {
 			updateStatus("测试用户验证失败")
@@ -1245,7 +1318,10 @@ func main() {
 			searchDNEntry,
 		),
 		container.NewBorder(nil, nil, makeLabel("过滤器:"), nil,
-			filterDNEntry,
+			container.NewVBox(
+				filterSelect,
+				filterDescription,
+			),
 		),
 		container.NewBorder(nil, nil, makeLabel("测试用户名:"), adminTestUserButton,
 			testUserEntry,
