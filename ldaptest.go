@@ -254,7 +254,7 @@ func (client *LDAPClient) connect() error {
 		client.conn, err = ldap.DialTLS("tcp", fmt.Sprintf("%s:%d", client.host, client.port), tlsConfig)
 	} else {
 		// 使用普通 LDAP 连接
-		client.conn, err = ldap.DialURL(client.getURL())
+		client.conn, err = ldap.Dial("tcp", fmt.Sprintf("%s:%d", client.host, client.port))
 	}
 
 	if err != nil {
@@ -441,8 +441,20 @@ func extractUsernameFromDN(dn string) string {
 
 // searchUserInDomain 在整个域中搜索用户
 func (client *LDAPClient) searchUserInDomain(username string) (bool, string) {
-	url := fmt.Sprintf("ldap://%s:%d", client.host, client.port)
-	l, err := ldap.DialURL(url)
+	var l *ldap.Conn
+	var err error
+
+	if client.useTLS {
+		// 使用 TLS 配置
+		tlsConfig := &tls.Config{
+			InsecureSkipVerify: true, // 测试环境下允许跳过证书验证
+		}
+		l, err = ldap.DialTLS("tcp", fmt.Sprintf("%s:%d", client.host, client.port), tlsConfig)
+	} else {
+		// 使用普通 LDAP 连接
+		l, err = ldap.Dial("tcp", fmt.Sprintf("%s:%d", client.host, client.port))
+	}
+
 	if err != nil {
 		log.Println("连接失败:", err)
 		return false, ""
@@ -781,11 +793,24 @@ func main() {
 		)
 
 		log.Println("尝试连接到 LDAP 服务器...")
-		l, err := ldap.DialURL(fmt.Sprintf("ldap://%s:%d", client.host, client.port))
-		if err != nil {
-			updateStatus(fmt.Sprintf("连接失败: %v", err))
-			log.Printf("连接失败: %v", err)
-			if netErr, ok := err.(net.Error); ok {
+		var l *ldap.Conn
+		var connErr error
+
+		if client.useTLS {
+			// 使用 TLS 配置
+			tlsConfig := &tls.Config{
+				InsecureSkipVerify: true, // 测试环境下允许跳过证书验证
+			}
+			l, connErr = ldap.DialTLS("tcp", fmt.Sprintf("%s:%d", client.host, client.port), tlsConfig)
+		} else {
+			// 使用普通 LDAP 连接
+			l, connErr = ldap.Dial("tcp", fmt.Sprintf("%s:%d", client.host, client.port))
+		}
+
+		if connErr != nil {
+			updateStatus(fmt.Sprintf("连接失败: %v", connErr))
+			log.Printf("连接失败: %v", connErr)
+			if netErr, ok := connErr.(net.Error); ok {
 				if netErr.Timeout() {
 					log.Println("连接超时")
 				}
@@ -793,7 +818,7 @@ func main() {
 					log.Println("临时网络错误")
 				}
 			}
-			log.Printf("详细错误信息: %T - %v", err, err)
+			log.Printf("详细错误信息: %T - %v", connErr, connErr)
 			return
 		}
 		log.Println("连接到 LDAP 服务器成功")
@@ -830,43 +855,18 @@ func main() {
 							// 检查连接状态
 							if l == nil {
 								log.Println("LDAP连接为空，尝试重新建立连接...")
-								var err error
-								l, err = ldap.DialURL(fmt.Sprintf("ldap://%s:%d", client.host, client.port))
-								if err != nil {
-									log.Printf("重新连接失败: %v", err)
-									dialog.ShowError(fmt.Errorf("连接已断开，重新连接失败: %v", err), myWindow)
-									updateStatus("重新授权失败：连接已断开")
-									return
+
+								if client.useTLS {
+									// 使用 TLS 配置
+									tlsConfig := &tls.Config{
+										InsecureSkipVerify: true, // 测试环境下允许跳过证书验证
+									}
+									l, err = ldap.DialTLS("tcp", fmt.Sprintf("%s:%d", client.host, client.port), tlsConfig)
+								} else {
+									// 使用普通 LDAP 连接
+									l, err = ldap.Dial("tcp", fmt.Sprintf("%s:%d", client.host, client.port))
 								}
-								defer l.Close()
 
-								// 重新绑定
-								if err := l.Bind(client.bindDN, client.bindPassword); err != nil {
-									log.Printf("重新绑定失败: %v", err)
-									dialog.ShowError(fmt.Errorf("重新绑定失败: %v", err), myWindow)
-									updateStatus("重新授权失败：无法重新绑定")
-									return
-								}
-								log.Println("成功重新建立连接和绑定")
-							}
-
-							// 验证连接是否仍然有效
-							searchRequest := ldap.NewSearchRequest(
-								"",
-								ldap.ScopeBaseObject,
-								ldap.NeverDerefAliases,
-								0, 0, false,
-								"(objectClass=*)",
-								[]string{"supportedLDAPVersion"},
-								nil,
-							)
-
-							log.Println("验证LDAP连接状态...")
-							_, err := l.Search(searchRequest)
-							if err != nil {
-								log.Printf("连接状态检查失败: %v", err)
-								// 尝试重新连接
-								l, err = ldap.DialURL(fmt.Sprintf("ldap://%s:%d", client.host, client.port))
 								if err != nil {
 									log.Printf("重新连接失败: %v", err)
 									dialog.ShowError(fmt.Errorf("连接已断开，重新连接失败: %v", err), myWindow)
@@ -899,7 +899,18 @@ func main() {
 								if l == nil || attempt > 1 {
 									log.Printf("尝试重新建立连接 (尝试 %d/%d)...", attempt, maxRetries)
 									var connErr error
-									activeConn, connErr = ldap.DialURL(fmt.Sprintf("ldap://%s:%d", client.host, client.port))
+
+									if client.useTLS {
+										// 使用 TLS 配置
+										tlsConfig := &tls.Config{
+											InsecureSkipVerify: true, // 测试环境下允许跳过证书验证
+										}
+										activeConn, connErr = ldap.DialTLS("tcp", fmt.Sprintf("%s:%d", client.host, client.port), tlsConfig)
+									} else {
+										// 使用普通 LDAP 连接
+										activeConn, connErr = ldap.Dial("tcp", fmt.Sprintf("%s:%d", client.host, client.port))
+									}
+
 									if connErr != nil {
 										log.Printf("连接失败: %v", connErr)
 										continue
@@ -974,7 +985,18 @@ func main() {
 									if activeConn == nil || attempt > 1 {
 										log.Printf("尝试重新建立连接进行域搜索 (尝试 %d/%d)...", attempt, maxRetries)
 										var connErr error
-										activeConn, connErr = ldap.DialURL(fmt.Sprintf("ldap://%s:%d", client.host, client.port))
+
+										if client.useTLS {
+											// 使用 TLS 配置
+											tlsConfig := &tls.Config{
+												InsecureSkipVerify: true, // 测试环境下允许跳过证书验证
+											}
+											activeConn, connErr = ldap.DialTLS("tcp", fmt.Sprintf("%s:%d", client.host, client.port), tlsConfig)
+										} else {
+											// 使用普通 LDAP 连接
+											activeConn, connErr = ldap.Dial("tcp", fmt.Sprintf("%s:%d", client.host, client.port))
+										}
+
 										if connErr != nil {
 											log.Printf("连接失败: %v", connErr)
 											continue
@@ -1368,10 +1390,32 @@ func main() {
 		)
 
 		log.Println("尝试连接到 LDAP 服务器...")
-		l, err := ldap.DialURL(fmt.Sprintf("ldap://%s:%d", client.host, client.port))
-		if err != nil {
-			updateStatus(fmt.Sprintf("连接失败: %v", err))
-			log.Printf("连接失败: %v", err)
+		var l *ldap.Conn
+		var connErr error
+
+		if client.useTLS {
+			// 使用 TLS 配置
+			tlsConfig := &tls.Config{
+				InsecureSkipVerify: true, // 测试环境下允许跳过证书验证
+			}
+			l, connErr = ldap.DialTLS("tcp", fmt.Sprintf("%s:%d", client.host, client.port), tlsConfig)
+		} else {
+			// 使用普通 LDAP 连接
+			l, connErr = ldap.Dial("tcp", fmt.Sprintf("%s:%d", client.host, client.port))
+		}
+
+		if connErr != nil {
+			updateStatus(fmt.Sprintf("连接失败: %v", connErr))
+			log.Printf("连接失败: %v", connErr)
+			if netErr, ok := connErr.(net.Error); ok {
+				if netErr.Timeout() {
+					log.Println("连接超时")
+				}
+				if netErr.Temporary() {
+					log.Println("临时网络错误")
+				}
+			}
+			log.Printf("详细错误信息: %T - %v", connErr, connErr)
 			return
 		}
 		log.Println("连接到 LDAP 服务器成功")
@@ -1417,7 +1461,18 @@ func main() {
 								if l == nil || attempt > 1 {
 									log.Printf("尝试重新建立连接 (尝试 %d/%d)...", attempt, maxRetries)
 									var connErr error
-									activeConn, connErr = ldap.DialURL(fmt.Sprintf("ldap://%s:%d", client.host, client.port))
+
+									if client.useTLS {
+										// 使用 TLS 配置
+										tlsConfig := &tls.Config{
+											InsecureSkipVerify: true, // 测试环境下允许跳过证书验证
+										}
+										activeConn, connErr = ldap.DialTLS("tcp", fmt.Sprintf("%s:%d", client.host, client.port), tlsConfig)
+									} else {
+										// 使用普通 LDAP 连接
+										activeConn, connErr = ldap.Dial("tcp", fmt.Sprintf("%s:%d", client.host, client.port))
+									}
+
 									if connErr != nil {
 										log.Printf("连接失败: %v", connErr)
 										continue
@@ -1492,7 +1547,18 @@ func main() {
 									if activeConn == nil || attempt > 1 {
 										log.Printf("尝试重新建立连接进行域搜索 (尝试 %d/%d)...", attempt, maxRetries)
 										var connErr error
-										activeConn, connErr = ldap.DialURL(fmt.Sprintf("ldap://%s:%d", client.host, client.port))
+
+										if client.useTLS {
+											// 使用 TLS 配置
+											tlsConfig := &tls.Config{
+												InsecureSkipVerify: true, // 测试环境下允许跳过证书验证
+											}
+											activeConn, connErr = ldap.DialTLS("tcp", fmt.Sprintf("%s:%d", client.host, client.port), tlsConfig)
+										} else {
+											// 使用普通 LDAP 连接
+											activeConn, connErr = ldap.Dial("tcp", fmt.Sprintf("%s:%d", client.host, client.port))
+										}
+
 										if connErr != nil {
 											log.Printf("连接失败: %v", connErr)
 											continue
@@ -1615,7 +1681,18 @@ func main() {
 							if l == nil || attempt > 1 {
 								log.Printf("尝试重新建立连接 (尝试 %d/%d)...", attempt, maxRetries)
 								var connErr error
-								activeConn, connErr = ldap.DialURL(fmt.Sprintf("ldap://%s:%d", client.host, client.port))
+
+								if client.useTLS {
+									// 使用 TLS 配置
+									tlsConfig := &tls.Config{
+										InsecureSkipVerify: true, // 测试环境下允许跳过证书验证
+									}
+									activeConn, connErr = ldap.DialTLS("tcp", fmt.Sprintf("%s:%d", client.host, client.port), tlsConfig)
+								} else {
+									// 使用普通 LDAP 连接
+									activeConn, connErr = ldap.Dial("tcp", fmt.Sprintf("%s:%d", client.host, client.port))
+								}
+
 								if connErr != nil {
 									log.Printf("连接失败: %v", connErr)
 									continue
@@ -1690,7 +1767,18 @@ func main() {
 								if activeConn == nil || attempt > 1 {
 									log.Printf("尝试重新建立连接进行域搜索 (尝试 %d/%d)...", attempt, maxRetries)
 									var connErr error
-									activeConn, connErr = ldap.DialURL(fmt.Sprintf("ldap://%s:%d", client.host, client.port))
+
+									if client.useTLS {
+										// 使用 TLS 配置
+										tlsConfig := &tls.Config{
+											InsecureSkipVerify: true, // 测试环境下允许跳过证书验证
+										}
+										activeConn, connErr = ldap.DialTLS("tcp", fmt.Sprintf("%s:%d", client.host, client.port), tlsConfig)
+									} else {
+										// 使用普通 LDAP 连接
+										activeConn, connErr = ldap.Dial("tcp", fmt.Sprintf("%s:%d", client.host, client.port))
+									}
+
 									if connErr != nil {
 										log.Printf("连接失败: %v", connErr)
 										continue
