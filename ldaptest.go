@@ -586,14 +586,138 @@ func main() {
 		if len(sr.Entries) > 0 {
 			foundGroupDN := sr.Entries[0].DN
 
-			// 新增DN比对逻辑（不区分大小写）
+			// 当DN完全相同时（不区分大小写）
 			if strings.EqualFold(strings.ToLower(foundGroupDN), strings.ToLower(ldapGroupEntry.Text)) {
-				updateStatus("组已存在且位置正确：" + foundGroupDN)
+				// 提示是否需要重新授权
+				dialog.ShowConfirm("组已存在",
+					fmt.Sprintf("组已存在且位置正确：\n%s\n\n是否要重新授权该组？", foundGroupDN),
+					func(reauth bool) {
+						if reauth {
+							updateStatus("开始重新授权组权限...")
+
+							// 检查连接状态
+							if l == nil {
+								log.Println("LDAP连接为空，尝试重新建立连接...")
+								var err error
+								l, err = ldap.DialURL(fmt.Sprintf("ldap://%s:%d", client.host, client.port))
+								if err != nil {
+									log.Printf("重新连接失败: %v", err)
+									dialog.ShowError(fmt.Errorf("连接已断开，重新连接失败: %v", err), myWindow)
+									updateStatus("重新授权失败：连接已断开")
+									return
+								}
+								defer l.Close()
+
+								// 重新绑定
+								if err := l.Bind(client.bindDN, client.bindPassword); err != nil {
+									log.Printf("重新绑定失败: %v", err)
+									dialog.ShowError(fmt.Errorf("重新绑定失败: %v", err), myWindow)
+									updateStatus("重新授权失败：无法重新绑定")
+									return
+								}
+								log.Println("成功重新建立连接和绑定")
+							}
+
+							// 验证连接是否仍然有效
+							searchRequest := ldap.NewSearchRequest(
+								"",
+								ldap.ScopeBaseObject,
+								ldap.NeverDerefAliases,
+								0, 0, false,
+								"(objectClass=*)",
+								[]string{"supportedLDAPVersion"},
+								nil,
+							)
+
+							log.Println("验证LDAP连接状态...")
+							_, err := l.Search(searchRequest)
+							if err != nil {
+								log.Printf("连接状态检查失败: %v", err)
+								// 尝试重新连接
+								l, err = ldap.DialURL(fmt.Sprintf("ldap://%s:%d", client.host, client.port))
+								if err != nil {
+									log.Printf("重新连接失败: %v", err)
+									dialog.ShowError(fmt.Errorf("连接已断开，重新连接失败: %v", err), myWindow)
+									updateStatus("重新授权失败：连接已断开")
+									return
+								}
+								defer l.Close()
+
+								// 重新绑定
+								if err := l.Bind(client.bindDN, client.bindPassword); err != nil {
+									log.Printf("重新绑定失败: %v", err)
+									dialog.ShowError(fmt.Errorf("重新绑定失败: %v", err), myWindow)
+									updateStatus("重新授权失败：无法重新绑定")
+									return
+								}
+								log.Println("成功重新建立连接和绑定")
+							} else {
+								log.Println("LDAP连接状态正常")
+							}
+
+							// 1. 获取组的 SID
+							log.Printf("开始获取组SID | DN: %s", foundGroupDN)
+							searchRequest = ldap.NewSearchRequest(
+								foundGroupDN,
+								ldap.ScopeBaseObject,
+								ldap.NeverDerefAliases,
+								0, 0, false,
+								"(objectClass=group)",
+								[]string{"objectSid", "nTSecurityDescriptor"},
+								nil,
+							)
+
+							sr, err := l.Search(searchRequest)
+							if err != nil {
+								log.Printf("获取组SID失败 | 错误类型: %T | 错误: %v", err, err)
+								if ldapErr, ok := err.(*ldap.Error); ok {
+									log.Printf("LDAP错误详情 | 代码: %d | 消息: %s", ldapErr.ResultCode, ldapErr.Err.Error())
+								}
+								dialog.ShowError(fmt.Errorf("获取组SID失败: %v", err), myWindow)
+								updateStatus("重新授权失败：无法获取组SID")
+								return
+							}
+
+							if len(sr.Entries) == 0 {
+								log.Printf("未找到组 | DN: %s", foundGroupDN)
+								updateStatus("重新授权失败：找不到组")
+								return
+							}
+
+							log.Printf("成功获取组信息 | 条目数: %d", len(sr.Entries))
+
+							// 2. 创建修改请求
+							modifyRequest := ldap.NewModifyRequest(foundGroupDN, nil)
+
+							// 3. 设置组类型为全局安全组
+							modifyRequest.Replace("groupType", []string{"-2147483646"})
+
+							// 4. 更新组描述
+							modifyRequest.Replace("description", []string{"LDAP Authentication Group"})
+
+							// 执行修改
+							log.Printf("执行修改请求 | DN: %s | 属性数: %d", foundGroupDN, len(modifyRequest.Changes))
+							if err := l.Modify(modifyRequest); err != nil {
+								log.Printf("重新授权失败 | 错误类型: %T | 详细错误: %v", err, err)
+								if ldapErr, ok := err.(*ldap.Error); ok {
+									log.Printf("LDAP错误详情 | 代码: %d | 消息: %s | 匹配的DN: %s",
+										ldapErr.ResultCode, ldapErr.Err.Error(), ldapErr.MatchedDN)
+								}
+								dialog.ShowError(fmt.Errorf("重新授权失败: %v", err), myWindow)
+								updateStatus("组重新授权失败")
+							} else {
+								log.Printf("重新授权成功 | DN: %s", foundGroupDN)
+								updateStatus(fmt.Sprintf("组重新授权成功：%s", foundGroupDN))
+							}
+						} else {
+							updateStatus("保持现有组权限不变：" + foundGroupDN)
+						}
+					}, myWindow)
 				ldapGroupEntry.SetText(foundGroupDN) // 标准化显示格式
 				return
 			}
 
-			// 仅当找到的组DN与输入不同时提示移动
+			// 原有的移动组逻辑保持不变
 			dialog.ShowConfirm("组已存在",
 				fmt.Sprintf("发现同名组：\n%s\n\n当前输入位置：\n%s\n\n是否要移动组？",
 					foundGroupDN,
@@ -623,7 +747,32 @@ func main() {
 		}
 
 		// 不存在则继续创建流程
-		// ... rest of the existing creation logic ...
+		updateStatus("未找到同名组，准备创建新组...")
+
+		// 确保目标路径存在
+		parentDN := strings.SplitN(ldapGroupEntry.Text, ",", 2)[1]
+		if err := client.ensureDNExists(parentDN); err != nil {
+			dialog.ShowError(fmt.Errorf("创建路径失败: %v", err), myWindow)
+			updateStatus("创建组失败：无法创建目标路径")
+			return
+		}
+
+		// 创建新组
+		addRequest := ldap.NewAddRequest(ldapGroupEntry.Text, nil)
+		addRequest.Attribute("objectClass", []string{"top", "group"})
+		addRequest.Attribute("groupType", []string{"-2147483646"}) // 全局安全组
+
+		// 从DN中提取CN作为sAMAccountName
+		cn := strings.TrimPrefix(strings.SplitN(ldapGroupEntry.Text, ",", 2)[0], "CN=")
+		addRequest.Attribute("sAMAccountName", []string{cn})
+
+		if err := l.Add(addRequest); err != nil {
+			dialog.ShowError(fmt.Errorf("创建组失败: %v", err), myWindow)
+			updateStatus(fmt.Sprintf("创建组失败: %v", err))
+			return
+		}
+
+		updateStatus(fmt.Sprintf("成功创建新组: %s", ldapGroupEntry.Text))
 	})
 
 	// 创建过滤器输入框（用于用户搜索的过滤条件）
