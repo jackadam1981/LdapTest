@@ -4,6 +4,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"encoding/binary"
 	"fmt"
 	"image/color"
@@ -148,6 +149,7 @@ type LDAPClient struct {
 	bindPassword string       // 绑定用密码
 	updateFunc   func(string) // 添加状态更新函数引用
 	conn         *ldap.Conn   // LDAP连接实例
+	useTLS       bool         // 是否使用TLS/SSL
 }
 
 // 全局变量
@@ -171,19 +173,48 @@ func encodePassword(password string) string {
 // 返回值：bool - true表示端口开放，false表示关闭
 func (client *LDAPClient) isPortOpen() bool {
 	address := net.JoinHostPort(client.host, fmt.Sprintf("%d", client.port))
-	// 使用TCP协议尝试建立连接
-	conn, err := net.Dial("tcp", address)
+
+	// 连接类型记录
+	connType := "标准LDAP"
+	if client.useTLS {
+		connType = "SSL/TLS"
+	}
+
+	log.Printf("检查%s端口 | 服务器: %s | 端口: %d", connType, client.host, client.port)
+
+	// 使用带3秒超时的TCP协议尝试建立连接
+	conn, err := net.DialTimeout("tcp", address, 3*time.Second)
 	if err != nil {
+		log.Printf("端口测试失败 | 错误: %v", err)
+		// 区分不同类型的错误
+		if netErr, ok := err.(net.Error); ok {
+			if netErr.Timeout() {
+				log.Println("连接超时")
+				if client.updateFunc != nil {
+					client.updateFunc(fmt.Sprintf("%s端口 %d 连接超时", connType, client.port))
+				}
+			} else if netErr.Temporary() {
+				log.Println("临时网络错误")
+				if client.updateFunc != nil {
+					client.updateFunc(fmt.Sprintf("%s端口 %d 临时网络错误", connType, client.port))
+				}
+			}
+		}
 		return false
 	}
+
 	conn.Close() // 关闭测试连接
+	log.Printf("%s端口 %d 已开放", connType, client.port)
+	if client.updateFunc != nil {
+		client.updateFunc(fmt.Sprintf("%s端口 %d 已开放", connType, client.port))
+	}
 	return true
 }
 
 // getURL 根据SSL状态返回合适的LDAP URL
 func (client *LDAPClient) getURL() string {
 	scheme := "ldap"
-	if isSSLEnabled {
+	if client.useTLS {
 		scheme = "ldaps"
 	}
 	return fmt.Sprintf("%s://%s:%d", scheme, client.host, client.port)
@@ -215,7 +246,17 @@ func (client *LDAPClient) connect() error {
 
 	// 建立新连接
 	var err error
-	client.conn, err = ldap.DialURL(client.getURL())
+	if client.useTLS {
+		// 使用 TLS 配置
+		tlsConfig := &tls.Config{
+			InsecureSkipVerify: true, // 测试环境下允许跳过证书验证
+		}
+		client.conn, err = ldap.DialTLS("tcp", fmt.Sprintf("%s:%d", client.host, client.port), tlsConfig)
+	} else {
+		// 使用普通 LDAP 连接
+		client.conn, err = ldap.DialURL(client.getURL())
+	}
+
 	if err != nil {
 		return fmt.Errorf("连接失败: %v", err)
 	}
@@ -248,31 +289,94 @@ func (client *LDAPClient) close() {
 
 // bindWithRetry 带重试的LDAP绑定
 func (client *LDAPClient) bindWithRetry(bindDN, bindPassword string) error {
-	err := client.bind(bindDN, bindPassword)
-	if err != nil {
-		// 如果绑定失败，尝试重新连接一次
-		client.close()
-		if err := client.connect(); err != nil {
-			return fmt.Errorf("重新连接失败: %v", err)
+	maxRetries := 3
+	var lastErr error
+
+	connType := "标准LDAP"
+	if client.useTLS {
+		connType = "SSL/TLS"
+	}
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		log.Printf("尝试%s绑定 (尝试 %d/%d) | DN: %s", connType, attempt, maxRetries, bindDN)
+
+		// 尝试绑定
+		err := client.bind(bindDN, bindPassword)
+		if err == nil {
+			// 绑定成功
+			log.Printf("%s绑定成功 | DN: %s", connType, bindDN)
+			return nil
 		}
-		// 重试绑定
-		if err := client.bind(bindDN, bindPassword); err != nil {
-			return fmt.Errorf("重新绑定失败: %v", err)
+
+		lastErr = err
+		log.Printf("%s绑定失败 (尝试 %d/%d) | 错误: %v", connType, attempt, maxRetries, err)
+
+		// 分析错误类型
+		if ldapErr, ok := err.(*ldap.Error); ok {
+			// 处理特定的LDAP错误
+			switch ldapErr.ResultCode {
+			case ldap.LDAPResultInvalidCredentials:
+				// 凭据错误，不需要重试
+				log.Printf("凭据无效，停止重试 | 错误代码: %d", ldapErr.ResultCode)
+				return fmt.Errorf("无效的凭据: %v", err)
+			case ldap.LDAPResultInsufficientAccessRights:
+				// 权限不足，不需要重试
+				log.Printf("权限不足，停止重试 | 错误代码: %d", ldapErr.ResultCode)
+				return fmt.Errorf("权限不足: %v", err)
+			case 200: // 网络错误代码
+				// 网络错误，关闭连接并重试
+				log.Printf("网络错误，将重试 | 错误代码: %d", ldapErr.ResultCode)
+			}
+		}
+
+		// 如果不是最后一次尝试，关闭连接并等待一段时间再重试
+		if attempt < maxRetries {
+			client.close()
+
+			// 增加等待时间，实现指数退避
+			waitTime := time.Duration(attempt) * 500 * time.Millisecond
+			log.Printf("等待 %v 后重试...", waitTime)
+			time.Sleep(waitTime)
+
+			// 重新连接
+			if err := client.connect(); err != nil {
+				log.Printf("重新连接失败: %v", err)
+				continue // 继续下一次尝试
+			}
 		}
 	}
-	return nil
+
+	// 所有尝试都失败了
+	return fmt.Errorf("在 %d 次尝试后绑定失败: %v", maxRetries, lastErr)
 }
 
 // testLDAPService 测试LDAP服务连通性
 func (client *LDAPClient) testLDAPService() bool {
 	defer client.close() // 确保连接最后被关闭
 
+	// 记录连接类型
+	connectionType := "标准LDAP"
+	if client.useTLS {
+		connectionType = "SSL/TLS加密LDAP"
+	}
+	log.Printf("开始测试%s连接 | 服务器: %s | 端口: %d", connectionType, client.host, client.port)
+
+	if client.updateFunc != nil {
+		client.updateFunc(fmt.Sprintf("测试%s连接...", connectionType))
+	}
+
 	if err := client.bindWithRetry(client.bindDN, client.bindPassword); err != nil {
-		log.Printf("服务测试失败: %v", err)
+		log.Printf("%s服务测试失败: %v", connectionType, err)
+		if client.updateFunc != nil {
+			client.updateFunc(fmt.Sprintf("%s连接测试失败: %v", connectionType, err))
+		}
 		return false
 	}
 
-	log.Println("LDAP服务验证成功")
+	log.Printf("%s服务验证成功", connectionType)
+	if client.updateFunc != nil {
+		client.updateFunc(fmt.Sprintf("%s连接测试成功", connectionType))
+	}
 	return true
 }
 
@@ -568,7 +672,7 @@ func main() {
 	ldapDNEntry.SetPlaceHolder("请输入LDAP DN")
 
 	// 创建LDAP权限组输入框（既可以输入又可以选择）
-	ldapGroupEntry := widget.NewSelectEntry([]string{"Group1", "Group2", "Group3"})
+	ldapGroupEntry := widget.NewSelectEntry([]string{""})
 	ldapGroupEntry.SetPlaceHolder("请输入或选择权限组")
 
 	// 创建自定义域名输入框（带自动生成DN功能）
@@ -641,6 +745,7 @@ func main() {
 			bindDN:       adminEntry.Text,
 			bindPassword: passwordEntry.Text,
 			updateFunc:   updateStatus,
+			useTLS:       isSSLEnabled,
 		}
 
 		// 先检查端口连通性
@@ -1187,6 +1292,7 @@ func main() {
 			bindDN:       adminEntry.Text,
 			bindPassword: passwordEntry.Text,
 			updateFunc:   updateStatus,
+			useTLS:       isSSLEnabled,
 		}
 
 		// 分步骤测试
@@ -1226,6 +1332,7 @@ func main() {
 			bindDN:       adminEntry.Text,
 			bindPassword: passwordEntry.Text,
 			updateFunc:   updateStatus,
+			useTLS:       isSSLEnabled,
 		}
 
 		// 先检查端口连通性
@@ -1762,6 +1869,7 @@ func main() {
 			bindDN:       adminEntry.Text,
 			bindPassword: passwordEntry.Text,
 			updateFunc:   updateStatus,
+			useTLS:       isSSLEnabled,
 		}
 
 		updateStatus(fmt.Sprintf("使用 %s 过滤器开始验证用户...", filterSelect.Selected))
@@ -1801,6 +1909,7 @@ func main() {
 			bindDN:       ldapDNEntry.Text,
 			bindPassword: ldappasswordEntry.Text,
 			updateFunc:   updateStatus,
+			useTLS:       isSSLEnabled,
 		}
 
 		updateStatus(fmt.Sprintf("使用 %s 过滤器开始验证用户...", filterSelect.Selected))
