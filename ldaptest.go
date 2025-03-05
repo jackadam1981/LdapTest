@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+	"unicode/utf16"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
@@ -159,14 +160,14 @@ var (
 
 // encodePassword 将密码编码为Active Directory所需的格式
 func encodePassword(password string) string {
-	// Active Directory需要UTF-16LE编码的密码，并用双引号包围
-	utf16le := make([]byte, 0, len(password)*2+2)
-	utf16le = append(utf16le, '"')
-	for _, r := range password {
-		utf16le = append(utf16le, byte(r), byte(r>>8))
+	quotedPassword := fmt.Sprintf("\"%s\"", password)
+	encodedPassword := utf16.Encode([]rune(quotedPassword))
+	bytePassword := make([]byte, len(encodedPassword)*2)
+	for i, v := range encodedPassword {
+		bytePassword[i*2] = byte(v)
+		bytePassword[i*2+1] = byte(v >> 8)
 	}
-	utf16le = append(utf16le, '"')
-	return string(utf16le)
+	return string(bytePassword)
 }
 
 // isPortOpen 检查LDAP服务端口是否开放
@@ -242,6 +243,12 @@ func (client *LDAPClient) connect() error {
 		// 连接无效，关闭它
 		client.conn.Close()
 		client.conn = nil
+	}
+
+	// 记录连接URL
+	log.Printf("正在连接到 %s", client.getURL())
+	if client.updateFunc != nil {
+		client.updateFunc(fmt.Sprintf("正在连接到 %s", client.getURL()))
 	}
 
 	// 建立新连接
@@ -656,6 +663,160 @@ func (client *LDAPClient) moveUser(oldDN, newDN string) error {
 	}
 
 	log.Printf("移动操作完成 | 新完整DN: %s", newDN)
+	return nil
+}
+
+func createUserWithoutSSL(l *ldap.Conn, userDN string, userName string, host string, updateFunc func(string)) error {
+	log.Printf("非SSL模式创建账户: %s", userDN)
+
+	// 创建用户请求
+	addRequest := ldap.NewAddRequest(userDN, nil)
+	addRequest.Attribute("objectClass", []string{"top", "person", "organizationalPerson", "user"})
+	addRequest.Attribute("sAMAccountName", []string{userName})
+	addRequest.Attribute("userAccountControl", []string{"2"}) // 禁用账户 (ACCOUNTDISABLE)
+
+	// 添加必需的属性
+	addRequest.Attribute("givenName", []string{userName})
+	addRequest.Attribute("sn", []string{userName})
+	addRequest.Attribute("displayName", []string{userName})
+	addRequest.Attribute("name", []string{userName})
+	addRequest.Attribute("userPrincipalName", []string{fmt.Sprintf("%s@%s", userName, host)})
+
+	// 执行创建
+	if err := l.Add(addRequest); err != nil {
+		log.Printf("创建用户失败: %v", err)
+		return fmt.Errorf("创建用户失败: %v", err)
+	}
+
+	log.Printf("非SSL模式成功创建禁用账户: %s", userDN)
+	updateFunc(fmt.Sprintf("成功创建新用户: %s（账户已禁用）", userDN))
+	return nil
+}
+
+func createUserWithSSL(l *ldap.Conn, client *LDAPClient, userDN string, userName string, password string, host string, myWindow fyne.Window, updateFunc func(string)) error {
+	log.Printf("SSL模式创建账户: %s", userDN)
+	updateFunc(fmt.Sprintf("正在创建SSL模式账户: %s", userDN))
+
+	// 检查用户是否已存在
+	baseDN := strings.Join(strings.Split(userDN, ",")[1:], ",") // 基础DN
+	searchRequest := ldap.NewSearchRequest(
+		baseDN,
+		ldap.ScopeWholeSubtree, ldap.NeverDerefAliases, 0, 0, false,
+		fmt.Sprintf("(&(objectClass=user)(sAMAccountName=%s))", userName),
+		[]string{"dn"},
+		nil,
+	)
+
+	sr, err := l.Search(searchRequest)
+	if err != nil {
+		log.Printf("检查用户是否存在时出错: %v", err)
+		return fmt.Errorf("检查用户是否存在时出错: %v", err)
+	}
+
+	if len(sr.Entries) > 0 {
+		message := fmt.Sprintf("用户 %s 已存在，跳过创建", userName)
+		log.Printf(message)
+		updateFunc(message)
+		return nil
+	}
+
+	// 确保父容器存在
+	log.Printf("验证父容器 %s 是否存在", baseDN)
+	updateFunc(fmt.Sprintf("验证父容器 %s 是否存在", baseDN))
+	if err := client.ensureDNExists(baseDN); err != nil {
+		log.Printf("父容器不存在或无法访问: %v", err)
+		return fmt.Errorf("父容器不存在或无法访问: %v", err)
+	}
+
+	// 准备密码
+	log.Printf("准备加密密码...")
+	updateFunc("准备加密密码...")
+	unicodePwd := encodePassword(password)
+
+	// 准备用户属性
+	log.Printf("准备用户属性...")
+	updateFunc("准备用户属性...")
+
+	// 创建用户请求
+	addRequest := ldap.NewAddRequest(userDN, nil)
+
+	// 必需的基本属性
+	addRequest.Attribute("objectClass", []string{"top", "person", "organizationalPerson", "user"})
+	addRequest.Attribute("cn", []string{userName})
+	addRequest.Attribute("sAMAccountName", []string{userName})
+
+	// 使用与PowerShell脚本相同的userAccountControl值
+	// 512 = NORMAL_ACCOUNT
+	addRequest.Attribute("userAccountControl", []string{"512"})
+
+	// 其他推荐属性
+	addRequest.Attribute("name", []string{userName})
+	addRequest.Attribute("displayName", []string{userName})
+	addRequest.Attribute("givenName", []string{userName})
+	addRequest.Attribute("sn", []string{userName})
+
+	// 设置UPN - 确保使用正确的域名
+	domain := host
+	if !strings.Contains(domain, ".") {
+		// 尝试从baseDN提取域名
+		domainComponents := []string{}
+		for _, part := range strings.Split(baseDN, ",") {
+			if strings.HasPrefix(part, "DC=") {
+				dc := strings.TrimPrefix(part, "DC=")
+				domainComponents = append(domainComponents, dc)
+			}
+		}
+		if len(domainComponents) > 0 {
+			domain = strings.Join(domainComponents, ".")
+		}
+	}
+
+	addRequest.Attribute("userPrincipalName", []string{fmt.Sprintf("%s@%s", userName, domain)})
+
+	// 在创建时直接设置密码
+	addRequest.Attribute("unicodePwd", []string{unicodePwd})
+
+	// 记录所有要添加的属性
+	log.Printf("用户DN: %s", userDN)
+	log.Printf("添加以下属性:")
+	for _, attr := range addRequest.Attributes {
+		attrValue := attr.Vals
+		// 如果是密码，不要在日志中显示
+		if attr.Type == "unicodePwd" {
+			attrValue = []string{"[受保护的密码]"}
+		}
+		log.Printf("  - %s: %v", attr.Type, attrValue)
+	}
+
+	// 执行创建
+	log.Printf("正在创建用户...")
+	updateFunc("正在创建用户...")
+	if err := l.Add(addRequest); err != nil {
+		errMsg := fmt.Sprintf("创建用户失败: %v", err)
+		log.Printf(errMsg)
+
+		// 获取更详细的错误信息
+		if ldapErr, ok := err.(*ldap.Error); ok {
+			log.Printf("LDAP错误代码: %d", ldapErr.ResultCode)
+
+			// 特殊处理错误代码53 (Unwilling To Perform)
+			if ldapErr.ResultCode == 53 {
+				log.Printf("可能的原因: 密码不满足复杂性要求，或缺少必需属性")
+				updateFunc("错误: 创建用户失败。可能的原因: 密码不满足复杂性要求，或缺少必需属性")
+
+				// 提示用户调整密码
+				dialog.ShowInformation("密码策略", "创建用户失败，可能是因为密码不满足复杂性要求。请尝试使用包含大小写字母、数字和特殊字符的密码。", myWindow)
+				return fmt.Errorf("创建用户失败: 密码可能不满足复杂性要求")
+			}
+		}
+
+		updateFunc(errMsg)
+		return fmt.Errorf(errMsg)
+	}
+
+	successMsg := fmt.Sprintf("SSL模式成功创建启用账户: %s (密码已设置)", userDN)
+	log.Printf(successMsg)
+	updateFunc(successMsg)
 	return nil
 }
 
@@ -1319,14 +1480,23 @@ func main() {
 
 		// 分步骤测试
 		if client.isPortOpen() {
-			updateStatus("LDAP 端口正常打开")
+			serviceType := "LDAP"
+			if client.useTLS {
+				serviceType = "LDAPS"
+			}
+			updateStatus(fmt.Sprintf("%s 端口正常打开", serviceType))
+
 			if client.testLDAPService() {
-				updateStatus("LDAP 服务正常")
+				updateStatus(fmt.Sprintf("%s 服务正常", serviceType))
 			} else {
-				updateStatus("LDAP 服务异常")
+				updateStatus(fmt.Sprintf("%s 服务异常", serviceType))
 			}
 		} else {
-			updateStatus("LDAP 端口未开放")
+			serviceType := "LDAP"
+			if client.useTLS {
+				serviceType = "LDAPS"
+			}
+			updateStatus(fmt.Sprintf("%s 端口未开放", serviceType))
 		}
 	})
 
@@ -1900,34 +2070,24 @@ func main() {
 			return
 		}
 
-		// 创建新用户
-		addRequest := ldap.NewAddRequest(ldapDNEntry.Text, nil)
-		addRequest.Attribute("objectClass", []string{"top", "person", "organizationalPerson", "user"})
-		addRequest.Attribute("sAMAccountName", []string{userName})
-		addRequest.Attribute("userAccountControl", []string{"2"}) // 禁用账户 (ACCOUNTDISABLE)
-
-		// 添加必需的属性
-		addRequest.Attribute("givenName", []string{userName})
-		addRequest.Attribute("sn", []string{userName})
-		addRequest.Attribute("displayName", []string{userName})
-		addRequest.Attribute("name", []string{userName})
-		addRequest.Attribute("userPrincipalName", []string{fmt.Sprintf("%s@%s", userName, client.host)})
-
-		if err := l.Add(addRequest); err != nil {
-			dialog.ShowError(fmt.Errorf("创建用户失败: %v", err), myWindow)
-			updateStatus(fmt.Sprintf("创建用户失败: %v", err))
-			return
+		// 根据SSL状态选择创建用户的函数
+		if isSSLEnabled {
+			// SSL模式：创建启用账号并设置密码
+			err := createUserWithSSL(l, &client, ldapDNEntry.Text, userName, ldappasswordEntry.Text, client.host, myWindow, updateStatus)
+			if err != nil {
+				dialog.ShowError(err, myWindow)
+				updateStatus(fmt.Sprintf("创建用户失败: %v", err))
+				return
+			}
+		} else {
+			// 非SSL模式：创建禁用账号
+			err := createUserWithoutSSL(l, ldapDNEntry.Text, userName, client.host, updateStatus)
+			if err != nil {
+				dialog.ShowError(err, myWindow)
+				updateStatus(fmt.Sprintf("创建用户失败: %v", err))
+				return
+			}
 		}
-
-		// 用户创建成功后，设置额外的属性
-		modifyRequest := ldap.NewModifyRequest(ldapDNEntry.Text, nil)
-		modifyRequest.Replace("userAccountControl", []string{"2"}) // 确保账户禁用
-
-		if err := l.Modify(modifyRequest); err != nil {
-			updateStatus(fmt.Sprintf("警告：用户创建成功，但设置账户控制失败: %v", err))
-		}
-
-		updateStatus(fmt.Sprintf("成功创建新用户: %s（账户已禁用）", ldapDNEntry.Text))
 	})
 
 	// 管理员验证用户按钮回调函数
