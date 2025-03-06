@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"log"
+	"net"
 	"strings"
 	"unicode/utf16"
 
@@ -115,12 +116,13 @@ func (client *LDAPClient) TestUserAuth(testUser, testPassword, searchDN, filterP
 	if client.UseTLS {
 		// 使用TLS连接
 		tlsConfig := &tls.Config{
-			InsecureSkipVerify: true,
+			InsecureSkipVerify: client.DebugMode, // 仅在调试模式下跳过证书验证
+			ServerName:         client.Host,
 		}
-		authConn, connErr = ldap.DialTLS("tcp", fmt.Sprintf("%s:%d", client.Host, client.Port), tlsConfig)
+		authConn, connErr = ldap.DialURL(fmt.Sprintf("ldaps://%s", net.JoinHostPort(client.Host, fmt.Sprintf("%d", client.Port))), ldap.DialWithTLSConfig(tlsConfig))
 	} else {
 		// 使用普通连接
-		authConn, connErr = ldap.Dial("tcp", fmt.Sprintf("%s:%d", client.Host, client.Port))
+		authConn, connErr = ldap.DialURL(fmt.Sprintf("ldap://%s", net.JoinHostPort(client.Host, fmt.Sprintf("%d", client.Port))))
 	}
 
 	if connErr != nil {

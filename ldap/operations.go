@@ -220,7 +220,7 @@ func (client *LDAPClient) UpdateUserPassword(userDN string, newPassword string) 
 	tlsConfig := &tls.Config{
 		InsecureSkipVerify: true,
 	}
-	updateConn, err := ldap.DialTLS("tcp", fmt.Sprintf("%s:%d", client.Host, client.Port), tlsConfig)
+	updateConn, err := ldap.DialURL(fmt.Sprintf("ldap://%s:%d", client.Host, client.Port), ldap.DialWithTLSConfig(tlsConfig))
 	if err != nil {
 		return fmt.Errorf("创建密码更新连接失败: %v", err)
 	}
