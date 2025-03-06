@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"log"
+	"strings"
 	"unicode/utf16"
 
 	"fyne.io/fyne/v2"
@@ -12,19 +13,17 @@ import (
 
 // EncodePassword 将密码编码为LDAP所需的格式
 func EncodePassword(password string) string {
+	// 添加双引号包装密码
+	quotedPassword := `"` + password + `"`
+
 	// 将密码转换为UTF-16LE编码
-	utf16Chars := utf16.Encode([]rune(password))
+	utf16Chars := utf16.Encode([]rune(quotedPassword))
 	bytes := make([]byte, len(utf16Chars)*2)
 	for i, char := range utf16Chars {
 		bytes[i*2] = byte(char)
 		bytes[i*2+1] = byte(char >> 8)
 	}
-
-	// 添加双引号
-	quotedBytes := append([]byte{'"'}, bytes...)
-	quotedBytes = append(quotedBytes, '"')
-
-	return string(quotedBytes)
+	return string(bytes)
 }
 
 // SearchUserInDomain 在域中搜索用户
@@ -171,26 +170,72 @@ func CreateUserWithoutSSL(conn *ldap.Conn, userDN string, userName string, host 
 
 // CreateUserWithSSL 在SSL模式下创建用户（启用状态并设置密码）
 func CreateUserWithSSL(conn *ldap.Conn, client *LDAPClient, userDN string, userName string, password string, host string, myWindow fyne.Window, updateFunc func(string)) error {
+	log.Printf("[DEBUG] 开始创建用户，用户DN: %s", userDN)
+	updateFunc(fmt.Sprintf("开始创建用户，用户DN: %s", userDN))
+
 	// 创建用户请求
 	addRequest := ldap.NewAddRequest(userDN, nil)
+	log.Printf("[DEBUG] 创建AddRequest对象成功")
 
 	// 设置必要的属性
+	log.Printf("[DEBUG] 开始设置用户属性")
 	addRequest.Attribute("objectClass", []string{"top", "person", "organizationalPerson", "user"})
 	addRequest.Attribute("sAMAccountName", []string{userName})
 	addRequest.Attribute("userAccountControl", []string{"512"}) // 启用账户
 
+	// 设置其他推荐属性
+	addRequest.Attribute("name", []string{userName})
+	addRequest.Attribute("displayName", []string{userName})
+	addRequest.Attribute("givenName", []string{userName})
+	addRequest.Attribute("sn", []string{userName})
+
+	// 设置UPN
+	domain := host
+	if !strings.Contains(domain, ".") {
+		// 尝试从userDN提取域名
+		domainComponents := []string{}
+		for _, part := range strings.Split(userDN, ",") {
+			if strings.HasPrefix(strings.ToUpper(part), "DC=") {
+				dc := strings.TrimPrefix(strings.ToUpper(part), "DC=")
+				domainComponents = append(domainComponents, dc)
+			}
+		}
+		if len(domainComponents) > 0 {
+			domain = strings.Join(domainComponents, ".")
+		}
+	}
+	upn := fmt.Sprintf("%s@%s", userName, domain)
+	log.Printf("[DEBUG] 设置UPN: %s", upn)
+	addRequest.Attribute("userPrincipalName", []string{upn})
+
 	// 设置密码
+	log.Printf("[DEBUG] 开始设置用户密码")
 	encodedPassword := EncodePassword(password)
 	addRequest.Attribute("unicodePwd", []string{encodedPassword})
 
+	// 记录所有要添加的属性
+	log.Printf("[DEBUG] 准备添加的属性:")
+	for _, attr := range addRequest.Attributes {
+		if attr.Type == "unicodePwd" {
+			log.Printf("[DEBUG] - %s: [已加密]", attr.Type)
+		} else {
+			log.Printf("[DEBUG] - %s: %v", attr.Type, attr.Vals)
+		}
+	}
+
 	// 执行创建
+	log.Printf("[DEBUG] 开始执行Add操作")
+	updateFunc("正在创建用户...")
 	if err := conn.Add(addRequest); err != nil {
+		log.Printf("[ERROR] 创建用户失败: %v", err)
+		if ldapErr, ok := err.(*ldap.Error); ok {
+			log.Printf("[ERROR] LDAP错误代码: %d", ldapErr.ResultCode)
+			log.Printf("[ERROR] LDAP错误消息: %s", ldapErr.Error())
+		}
 		return fmt.Errorf("创建用户失败: %v", err)
 	}
 
-	if updateFunc != nil {
-		updateFunc(fmt.Sprintf("成功创建用户: %s (启用状态)", userDN))
-	}
-
+	log.Printf("[DEBUG] 用户创建成功")
+	updateFunc(fmt.Sprintf("成功创建用户: %s", userDN))
 	return nil
 }

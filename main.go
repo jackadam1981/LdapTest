@@ -19,6 +19,100 @@ import (
 	"LdapTest/ui"
 )
 
+// 处理已存在用户的情况
+func handleExistingUser(client *ldap.LDAPClient, userDN string, password string, groupDN string, isSSL bool, updateStatus func(string), window fyne.Window) {
+	if isSSL {
+		dialog.ShowConfirm("用户已存在",
+			fmt.Sprintf("用户已存在且位置相同：\n%s\n\n是否要更新用户密码？", userDN),
+			func(updatePassword bool) {
+				if updatePassword {
+					updateStatus("开始更新用户密码...")
+					if err := client.UpdateUserPassword(userDN, password); err != nil {
+						dialog.ShowError(err, window)
+						updateStatus("用户密码更新失败: " + err.Error())
+						return
+					}
+					updateStatus("用户密码更新成功")
+				} else {
+					updateStatus("保持用户密码不变：" + userDN)
+				}
+				promptForGroupMembership(client, userDN, groupDN, updateStatus, window)
+			}, window)
+	} else {
+		dialog.ShowConfirm("用户已存在",
+			fmt.Sprintf("用户已存在且位置相同：\n%s\n\n非SSL模式下无法更新密码，是否继续？", userDN),
+			func(confirmed bool) {
+				if confirmed {
+					updateStatus("用户已存在：" + userDN)
+					promptForGroupMembership(client, userDN, groupDN, updateStatus, window)
+				} else {
+					updateStatus("操作已取消")
+				}
+			}, window)
+	}
+}
+
+// 处理用户移动的情况
+func handleUserMove(client *ldap.LDAPClient, currentDN string, targetDN string, password string, groupDN string, isSSL bool, updateStatus func(string), window fyne.Window) {
+	dialog.ShowConfirm("用户已存在",
+		fmt.Sprintf("发现同名用户：\n%s\n\n当前输入位置：\n%s\n\n是否要移动用户？",
+			currentDN,
+			targetDN),
+		func(move bool) {
+			if move {
+				updateStatus(fmt.Sprintf("正在移动用户 %s -> %s", currentDN, targetDN))
+				if err := client.MoveUserToNewLocation(currentDN, targetDN); err != nil {
+					dialog.ShowError(err, window)
+					updateStatus("用户移动失败: " + err.Error())
+					return
+				}
+				updateStatus("用户移动成功")
+				promptForGroupMembership(client, targetDN, groupDN, updateStatus, window)
+
+				if isSSL {
+					promptForPasswordUpdate(client, targetDN, password, updateStatus, window)
+				}
+			} else {
+				updateStatus("已使用现有用户位置：" + currentDN)
+				promptForGroupMembership(client, currentDN, groupDN, updateStatus, window)
+			}
+		}, window)
+}
+
+// 提示是否加入LDAP组
+func promptForGroupMembership(client *ldap.LDAPClient, userDN string, groupDN string, updateStatus func(string), window fyne.Window) {
+	dialog.ShowConfirm("添加到组",
+		fmt.Sprintf("是否要将用户加入LDAP组？\n用户: %s\n组: %s", userDN, groupDN),
+		func(addToGroup bool) {
+			if addToGroup {
+				updateStatus(fmt.Sprintf("正在将用户添加到组 %s", groupDN))
+				if err := client.HandleGroupMembership(userDN, groupDN); err != nil {
+					dialog.ShowError(err, window)
+					updateStatus("添加用户到组失败: " + err.Error())
+				} else {
+					updateStatus("用户已成功添加到组")
+				}
+			}
+		}, window)
+}
+
+// 提示是否更新密码
+func promptForPasswordUpdate(client *ldap.LDAPClient, userDN string, password string, updateStatus func(string), window fyne.Window) {
+	dialog.ShowConfirm("更新密码",
+		"是否要更新用户密码？",
+		func(updatePassword bool) {
+			if updatePassword {
+				updateStatus("开始更新用户密码...")
+				if err := client.UpdateUserPassword(userDN, password); err != nil {
+					dialog.ShowError(err, window)
+					updateStatus("用户密码更新失败: " + err.Error())
+				} else {
+					updateStatus("用户密码更新成功")
+				}
+			}
+		}, window)
+}
+
 func main() {
 	// 设置中文字体路径（仅Windows系统）
 	os.Setenv("FYNE_FONT", "C:\\Windows\\Fonts\\SIMYOU.TTF")
@@ -35,16 +129,45 @@ func main() {
 	statusArea.Disable()                    // 设置为只读模式
 	statusArea.Wrapping = fyne.TextWrapWord // 启用自动换行
 
+	// 设置初始文本样式
+	statusArea.TextStyle = fyne.TextStyle{
+		Bold:      false,
+		Italic:    false,
+		Monospace: true, // 使用等宽字体确保显示一致
+	}
+
 	// 状态容器 - 移除标题，直接使用状态区域
 	statusContainer := container.NewVScroll(statusArea)
 
 	// 定义状态更新函数
 	updateStatus := func(status string) {
-		currentTime := time.Now().Format("15:04:05")      // 获取当前时间
-		statusArea.TextStyle = fyne.TextStyle{Bold: true} // 设置粗体显示
-		newText := statusArea.Text + currentTime + " " + status + "\n"
-		statusArea.SetText(newText)
-		statusArea.CursorRow = len(strings.Split(statusArea.Text, "\n")) - 1 // 自动滚动到底部
+		// 使用等宽字体格式化时间戳
+		timestamp := time.Now().Format("15:04:05")
+
+		// 构建新的状态消息
+		newStatus := fmt.Sprintf("%s %s\n", timestamp, status)
+
+		// 追加新状态到现有文本
+		if statusArea.Text == "" {
+			statusArea.SetText(newStatus)
+		} else {
+			statusArea.SetText(statusArea.Text + newStatus)
+		}
+
+		// 确保文本样式保持一致
+		statusArea.TextStyle = fyne.TextStyle{
+			Bold:      false,
+			Italic:    false,
+			Monospace: true, // 使用等宽字体确保显示一致
+		}
+
+		// 延迟执行滚动操作，确保文本更新完成
+		go func() {
+			time.Sleep(100 * time.Millisecond)
+			statusArea.CursorRow = len(strings.Split(statusArea.Text, "\n")) - 1
+			statusArea.Refresh()
+			statusContainer.ScrollToBottom()
+		}()
 	}
 
 	// 创建输入框
@@ -99,6 +222,8 @@ func main() {
 		adminEntry.SetText("CN=Administrator,CN=Users," + domainDN)
 		searchDNEntry.SetText(domainDN)
 		ldapDNEntry.SetText("CN=Ldap,CN=Ldap," + domainDN)
+		// 添加ldap权限组自动填充
+		ldapGroupEntry.SetText("CN=LdapGroup,CN=Users," + domainDN)
 	})
 	domainEntry.SetPlaceHolder("example.com")
 
@@ -214,14 +339,15 @@ func main() {
 
 	// 创建LDAP用户按钮
 	createLdapButton := widget.NewButton("创建LDAP用户", func() {
-		// 从DN中提取用户名
-		userDN := ldapDNEntry.Text
-		parts := strings.Split(userDN, ",")
-		if len(parts) == 0 || !strings.HasPrefix(strings.ToLower(parts[0]), "cn=") {
-			updateStatus("无效的用户DN格式")
+		// 输入验证
+		if ldapDNEntry.Text == "" {
+			dialog.ShowError(fmt.Errorf("LDAP DN不能为空"), myWindow)
 			return
 		}
-		userName := strings.TrimPrefix(parts[0], "CN=")
+		if isSSLEnabled && ldapPasswordEntry.Text == "" {
+			dialog.ShowError(fmt.Errorf("SSL模式下LDAP密码不能为空"), myWindow)
+			return
+		}
 
 		port, err := portEntry.GetPort()
 		if err != nil {
@@ -251,69 +377,39 @@ func main() {
 			return
 		}
 
-		// 检查用户是否已存在
-		found, foundUserDN := client.SearchUserInDomain(userName)
+		// 从输入的DN中提取CN
+		enteredCN := strings.SplitN(ldapDNEntry.Text, ",", 2)[0]
+		if !strings.HasPrefix(enteredCN, "CN=") {
+			updateStatus("无效的DN格式")
+			return
+		}
+		userName := strings.TrimPrefix(enteredCN, "CN=")
+
+		// 检查用户是否存在
+		found, foundUserDN := client.SearchUser(userName, searchDNEntry.Text)
 		if found {
-			// 用户已存在，询问是否移动
-			dialog.ShowConfirm("用户已存在",
-				fmt.Sprintf("发现同名用户：\n%s\n\n当前输入位置：\n%s\n\n是否要移动用户？",
-					foundUserDN,
-					userDN),
-				func(move bool) {
-					if move {
-						updateStatus(fmt.Sprintf("正在移动用户 %s -> %s", foundUserDN, userDN))
-						if err := client.MoveUser(foundUserDN, userDN); err != nil {
-							dialog.ShowError(fmt.Errorf("移动失败: %v", err), myWindow)
-							updateStatus("用户移动失败")
-						} else {
-							updateStatus("用户移动成功")
-							ldapDNEntry.SetText(userDN) // 保持新位置
-						}
-					} else {
-						// 自动填充查询到的用户位置
-						ldapDNEntry.SetText(foundUserDN)
-						updateStatus("已使用现有用户位置：" + foundUserDN)
-					}
-				}, myWindow)
+			// 当DN完全相同时（不区分大小写）
+			if strings.EqualFold(strings.ToLower(foundUserDN), strings.ToLower(ldapDNEntry.Text)) {
+				handleExistingUser(&client, foundUserDN, ldapPasswordEntry.Text, ldapGroupEntry.Text, isSSLEnabled, updateStatus, myWindow)
+				return
+			}
+
+			// 用户存在但位置不同，询问是否移动
+			handleUserMove(&client, foundUserDN, ldapDNEntry.Text, ldapPasswordEntry.Text, ldapGroupEntry.Text, isSSLEnabled, updateStatus, myWindow)
 			return
 		}
 
-		// 不存在则继续创建流程
+		// 不存在则创建新用户
 		updateStatus("未找到同名用户，准备创建新用户...")
-
-		// 确保目标路径存在
-		parentDN := strings.SplitN(userDN, ",", 2)[1]
-		if err := client.EnsureDNExists(parentDN); err != nil {
-			dialog.ShowError(fmt.Errorf("创建路径失败: %v", err), myWindow)
-			updateStatus("创建用户失败：无法创建目标路径")
-			return
-		}
-
-		// 确保连接依然有效
-		conn, err := client.GetConnection()
+		err = client.CreateOrUpdateUser(ldapDNEntry.Text, userName, ldapPasswordEntry.Text, isSSLEnabled)
 		if err != nil {
-			updateStatus(fmt.Sprintf("创建用户时LDAP连接失败: %v", err))
+			dialog.ShowError(fmt.Errorf("创建用户失败: %s", err), myWindow)
+			updateStatus(fmt.Sprintf("创建用户失败: %s", err))
 			return
 		}
 
-		// 根据SSL状态选择创建用户的函数
-		if isSSLEnabled {
-			// SSL模式：创建启用账号并设置密码
-			err := ldap.CreateUserWithSSL(conn, &client, userDN, userName, ldapPasswordEntry.Text, client.Host, myWindow, updateStatus)
-			if err != nil {
-				dialog.ShowError(err, myWindow)
-				updateStatus(fmt.Sprintf("创建用户失败: %v", err))
-				return
-			}
-		} else {
-			// 非SSL模式：创建禁用账号
-			err := ldap.CreateUserWithoutSSL(conn, userDN, userName, client.Host, updateStatus)
-			if err != nil {
-				dialog.ShowError(err, myWindow)
-				updateStatus(fmt.Sprintf("创建用户失败: %v", err))
-				return
-			}
-		}
+		// 询问是否要将用户加入LDAP组
+		promptForGroupMembership(&client, ldapDNEntry.Text, ldapGroupEntry.Text, updateStatus, myWindow)
 	})
 
 	// 检查权限组按钮
@@ -380,8 +476,8 @@ func main() {
 								"description": {"LDAP Authentication Group"},
 							}
 							if err := client.ModifyGroup(ldapGroupEntry.Text, attributes); err != nil {
-								dialog.ShowError(fmt.Errorf("重新授权失败: %v", err), myWindow)
-								updateStatus("组重新授权失败")
+								dialog.ShowError(fmt.Errorf("重新授权失败: %s", ldap.ParseLDAPError(err)), myWindow)
+								updateStatus("组重新授权失败: " + ldap.ParseLDAPError(err))
 							} else {
 								updateStatus(fmt.Sprintf("组重新授权成功：%s", ldapGroupEntry.Text))
 							}
@@ -402,8 +498,8 @@ func main() {
 					if move {
 						updateStatus(fmt.Sprintf("正在移动组 %s -> %s", foundGroupDN, ldapGroupEntry.Text))
 						if err := client.MoveUser(foundGroupDN, ldapGroupEntry.Text); err != nil {
-							dialog.ShowError(fmt.Errorf("移动失败: %v", err), myWindow)
-							updateStatus("组移动失败")
+							dialog.ShowError(fmt.Errorf("移动失败: %s", ldap.ParseLDAPError(err)), myWindow)
+							updateStatus("组移动失败: " + ldap.ParseLDAPError(err))
 						} else {
 							updateStatus("组移动成功")
 							ldapGroupEntry.SetText(ldapGroupEntry.Text) // 保持新位置
@@ -422,8 +518,8 @@ func main() {
 
 		// 创建新组
 		if err := client.CreateGroup(ldapGroupEntry.Text, groupName); err != nil {
-			dialog.ShowError(fmt.Errorf("创建组失败: %v", err), myWindow)
-			updateStatus(fmt.Sprintf("创建组失败: %v", err))
+			dialog.ShowError(fmt.Errorf("创建组失败: %s", ldap.ParseLDAPError(err)), myWindow)
+			updateStatus(fmt.Sprintf("创建组失败: %s", ldap.ParseLDAPError(err)))
 			return
 		}
 

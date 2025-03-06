@@ -57,11 +57,19 @@ func (e *CustomPortEntry) FocusLost() {
 func (e *CustomPortEntry) FocusGained() {
 	e.Entry.FocusGained()
 
-	// 如果是默认值，则清空以便用户输入
-	if e.Text == "389" || e.Text == "636" {
-		// 临时保存当前文本
+	// 如果输入框为空，则填充默认值389
+	if e.Text == "" {
+		e.SetText("389")
+		// 全选文本，便于用户直接替换
 		currentText := e.Text
-		// 清空并重新设置文本，这样光标会在文本末尾
+		e.SetText("")
+		e.SetText(currentText)
+	}
+
+	// 如果是默认值，则选择文本以便用户直接替换
+	if e.Text == "389" || e.Text == "636" {
+		// 全选文本，便于用户直接替换
+		currentText := e.Text
 		e.SetText("")
 		e.SetText(currentText)
 	}

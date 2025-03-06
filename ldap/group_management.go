@@ -187,3 +187,26 @@ func (client *LDAPClient) GetUserGroups(userDN string) ([]string, error) {
 	// 获取组列表
 	return sr.Entries[0].GetAttributeValues("memberOf"), nil
 }
+
+// RemoveUserFromAllGroups 从所有组中移除用户
+func (client *LDAPClient) RemoveUserFromAllGroups(userDN string) error {
+	// 获取用户当前所属的组
+	groups, err := client.GetUserGroups(userDN)
+	if err != nil {
+		return fmt.Errorf("获取用户组失败: %v", err)
+	}
+
+	// 从每个组中移除用户
+	for _, groupDN := range groups {
+		if err := client.RemoveUserFromGroup(userDN, groupDN); err != nil {
+			log.Printf("从组 %s 移除用户时出错: %v", groupDN, err)
+			// 继续处理其他组
+		}
+	}
+
+	if client.UpdateFunc != nil {
+		client.UpdateFunc(fmt.Sprintf("已从所有组中移除用户 %s", userDN))
+	}
+
+	return nil
+}
