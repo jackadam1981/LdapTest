@@ -1,4 +1,4 @@
-module local
+module LdapTest
 
 go 1.21.4
 
