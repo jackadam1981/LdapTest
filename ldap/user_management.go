@@ -1,38 +1,19 @@
 package ldap
 
 import (
-	"crypto/tls"
-	"fmt"
-	"log"
-	"net"
+	"errors"
 	"strings"
-	"unicode/utf16"
 
 	"fyne.io/fyne/v2"
 	"github.com/go-ldap/ldap/v3"
 )
-
-// EncodePassword 将密码编码为LDAP所需的格式
-func EncodePassword(password string) string {
-	// 添加双引号包装密码
-	quotedPassword := `"` + password + `"`
-
-	// 将密码转换为UTF-16LE编码
-	utf16Chars := utf16.Encode([]rune(quotedPassword))
-	bytes := make([]byte, len(utf16Chars)*2)
-	for i, char := range utf16Chars {
-		bytes[i*2] = byte(char)
-		bytes[i*2+1] = byte(char >> 8)
-	}
-	return string(bytes)
-}
 
 // SearchUserInDomain 在域中搜索用户
 func (client *LDAPClient) SearchUserInDomain(username string) (bool, string) {
 	// 确保连接有效
 	conn, err := client.GetConnection()
 	if err != nil {
-		log.Printf("搜索用户时连接失败: %v", err)
+		client.Error("搜索用户时连接失败: %v", err)
 		return false, ""
 	}
 
@@ -42,7 +23,7 @@ func (client *LDAPClient) SearchUserInDomain(username string) (bool, string) {
 		ldap.ScopeWholeSubtree,
 		ldap.NeverDerefAliases,
 		0, 0, false,
-		fmt.Sprintf("(&(objectClass=user)(sAMAccountName=%s))", ldap.EscapeFilter(username)),
+		"(&(objectClass=user)(sAMAccountName="+ldap.EscapeFilter(username)+"))",
 		[]string{"dn"},
 		nil,
 	)
@@ -50,7 +31,43 @@ func (client *LDAPClient) SearchUserInDomain(username string) (bool, string) {
 	// 执行搜索
 	sr, err := conn.Search(searchRequest)
 	if err != nil {
-		log.Printf("搜索用户失败: %v", err)
+		client.Error("搜索用户失败: %v", err)
+		return false, ""
+	}
+
+	// 检查是否找到用户
+	if len(sr.Entries) > 0 {
+		return true, sr.Entries[0].DN
+	}
+
+	return false, ""
+}
+
+// SearchUser 根据用户名搜索用户
+func (client *LDAPClient) SearchUser(userName string, searchBase string) (bool, string) {
+	client.Debug("正在搜索用户：%s，搜索范围：%s", userName, searchBase)
+	// 获取有效连接
+	conn, err := client.GetConnection()
+	if err != nil {
+		client.Error("连接失败: %v", err)
+		return false, ""
+	}
+
+	// 构建搜索请求，按CN进行模糊查询
+	searchRequest := ldap.NewSearchRequest(
+		searchBase,
+		ldap.ScopeWholeSubtree,
+		ldap.NeverDerefAliases,
+		0, 0, false,
+		"(&(objectClass=user)(cn="+ldap.EscapeFilter(userName)+"))",
+		[]string{"dn"},
+		nil,
+	)
+
+	// 执行搜索
+	sr, err := conn.Search(searchRequest)
+	if err != nil {
+		client.Error("搜索用户失败: %v", err)
 		return false, ""
 	}
 
@@ -63,93 +80,75 @@ func (client *LDAPClient) SearchUserInDomain(username string) (bool, string) {
 }
 
 // TestUserAuth 测试用户认证
-func (client *LDAPClient) TestUserAuth(testUser, testPassword, searchDN, filterPattern string) bool {
-	// 确保连接有效
-	if err := client.EnsureConnection(); err != nil {
-		log.Printf("测试用户认证时连接失败: %v", err)
-		if client.UpdateFunc != nil {
-			client.UpdateFunc(fmt.Sprintf("连接失败: %v", err))
-		}
+func (client *LDAPClient) TestUserAuth(testUser string, testPassword string, searchDN string, filterPattern string) bool {
+	client.Debug("正在测试用户认证：%s，搜索范围：%s", testUser, searchDN)
+	// 获取有效连接
+	conn, err := client.GetConnection()
+	if err != nil {
+		client.Error("测试用户认证时连接失败: %v", err)
 		return false
 	}
 
-	// 构建搜索过滤器
-	filter := fmt.Sprintf(filterPattern, ldap.EscapeFilter(testUser))
-
 	// 构建搜索请求
 	searchRequest := ldap.NewSearchRequest(
-		searchDN,
-		ldap.ScopeWholeSubtree,
-		ldap.NeverDerefAliases,
-		0, 0, false,
-		filter,
-		[]string{"distinguishedName"},
+		searchDN,                                       // 基准DN
+		ldap.ScopeWholeSubtree, ldap.NeverDerefAliases, // 搜索范围和别名处理
+		0, 0, false, // 大小限制，时间限制，仅类型
+		strings.Replace(filterPattern, "%s", ldap.EscapeFilter(testUser), 1), // 搜索过滤器
+		[]string{"dn"}, // 返回属性
 		nil,
 	)
 
 	// 执行搜索
-	sr, err := client.Conn.Search(searchRequest)
+	sr, err := conn.Search(searchRequest)
 	if err != nil {
-		log.Printf("搜索用户失败: %v", err)
-		if client.UpdateFunc != nil {
-			client.UpdateFunc(fmt.Sprintf("搜索用户失败: %v", err))
-		}
+		client.Error("搜索用户失败: %v", err)
 		return false
 	}
 
-	// 检查是否找到用户
+	// 检查结果
 	if len(sr.Entries) == 0 {
-		log.Printf("未找到用户: %s", testUser)
-		if client.UpdateFunc != nil {
-			client.UpdateFunc(fmt.Sprintf("未找到用户: %s", testUser))
-		}
+		client.Warn("未找到用户: %s", testUser)
 		return false
 	}
 
 	// 获取用户DN
 	userDN := sr.Entries[0].DN
 
-	// 创建新的连接进行用户认证
-	var authConn *ldap.Conn
-	var connErr error
-
-	if client.UseTLS {
-		// 使用TLS连接
-		tlsConfig := &tls.Config{
-			InsecureSkipVerify: client.DebugMode, // 仅在调试模式下跳过证书验证
-			ServerName:         client.Host,
-		}
-		authConn, connErr = ldap.DialURL(fmt.Sprintf("ldaps://%s", net.JoinHostPort(client.Host, fmt.Sprintf("%d", client.Port))), ldap.DialWithTLSConfig(tlsConfig))
-	} else {
-		// 使用普通连接
-		authConn, connErr = ldap.DialURL(fmt.Sprintf("ldap://%s", net.JoinHostPort(client.Host, fmt.Sprintf("%d", client.Port))))
-	}
-
+	// 创建新的连接用于认证
+	authConn, connErr := client.GetConnection()
 	if connErr != nil {
-		log.Printf("创建认证连接失败: %v", connErr)
-		if client.UpdateFunc != nil {
-			client.UpdateFunc(fmt.Sprintf("创建认证连接失败: %v", connErr))
-		}
+		client.Error("创建认证连接失败: %v", connErr)
 		return false
 	}
 	defer authConn.Close()
 
-	// 尝试使用用户凭证绑定
-	if err := authConn.Bind(userDN, testPassword); err != nil {
-		log.Printf("用户认证失败: %v", err)
-		if client.UpdateFunc != nil {
-			client.UpdateFunc(fmt.Sprintf("用户认证失败: %v", err))
-		}
+	// 尝试使用用户凭据绑定
+	err = authConn.Bind(userDN, testPassword)
+	if err != nil {
+		client.Error("用户认证失败: %v", err)
 		return false
 	}
 
-	// 认证成功
-	log.Printf("用户认证成功: %s", userDN)
+	client.Info("用户认证成功: %s", userDN)
 	return true
 }
 
 // CreateUserWithoutSSL 在非SSL模式下创建用户（禁用状态）
-func CreateUserWithoutSSL(conn *ldap.Conn, userDN string, userName string, host string, updateFunc func(string)) error {
+func (client *LDAPClient) CreateUserWithoutSSL(userDN string, userName string, host string) error {
+	client.Debug("开始创建用户：%s", userDN)
+	// 获取有效连接
+	conn, err := client.GetConnection()
+	if err != nil {
+		return errors.New("获取连接失败: " + err.Error())
+	}
+
+	// 确保父容器存在
+	parentDN := strings.SplitN(userDN, ",", 2)[1]
+	if err := client.EnsureDNExists(parentDN); err != nil {
+		return errors.New("创建路径失败: " + ParseLDAPError(err))
+	}
+
 	// 创建用户请求
 	addRequest := ldap.NewAddRequest(userDN, nil)
 
@@ -160,27 +159,35 @@ func CreateUserWithoutSSL(conn *ldap.Conn, userDN string, userName string, host 
 
 	// 执行创建
 	if err := conn.Add(addRequest); err != nil {
-		return fmt.Errorf("创建用户失败: %v", err)
+		return errors.New("创建用户失败: " + err.Error())
 	}
 
-	if updateFunc != nil {
-		updateFunc(fmt.Sprintf("成功创建用户: %s (禁用状态)", userDN))
-	}
-
+	client.Info("成功创建用户: %s (禁用状态)", userDN)
 	return nil
 }
 
 // CreateUserWithSSL 在SSL模式下创建用户（启用状态并设置密码）
-func CreateUserWithSSL(conn *ldap.Conn, client *LDAPClient, userDN string, userName string, password string, host string, myWindow fyne.Window, updateFunc func(string)) error {
-	log.Printf("[DEBUG] 开始创建用户，用户DN: %s", userDN)
-	updateFunc(fmt.Sprintf("开始创建用户，用户DN: %s", userDN))
+func (client *LDAPClient) CreateUserWithSSL(userDN string, userName string, password string, host string, myWindow fyne.Window) error {
+	client.Debug("开始创建用户，用户DN: %s", userDN)
+
+	// 获取有效连接
+	conn, err := client.GetConnection()
+	if err != nil {
+		return errors.New("获取连接失败: " + err.Error())
+	}
+
+	// 确保父容器存在
+	parentDN := strings.SplitN(userDN, ",", 2)[1]
+	if err := client.EnsureDNExists(parentDN); err != nil {
+		return errors.New("创建路径失败: " + ParseLDAPError(err))
+	}
 
 	// 创建用户请求
 	addRequest := ldap.NewAddRequest(userDN, nil)
-	log.Printf("[DEBUG] 创建AddRequest对象成功")
+	client.Debug("创建AddRequest对象成功")
 
 	// 设置必要的属性
-	log.Printf("[DEBUG] 开始设置用户属性")
+	client.Debug("开始设置用户属性")
 	addRequest.Attribute("objectClass", []string{"top", "person", "organizationalPerson", "user"})
 	addRequest.Attribute("sAMAccountName", []string{userName})
 	addRequest.Attribute("userAccountControl", []string{"512"}) // 启用账户
@@ -206,38 +213,54 @@ func CreateUserWithSSL(conn *ldap.Conn, client *LDAPClient, userDN string, userN
 			domain = strings.Join(domainComponents, ".")
 		}
 	}
-	upn := fmt.Sprintf("%s@%s", userName, domain)
-	log.Printf("[DEBUG] 设置UPN: %s", upn)
+	upn := userName + "@" + domain
+	client.Debug("设置UPN: %s", upn)
 	addRequest.Attribute("userPrincipalName", []string{upn})
 
 	// 设置密码
-	log.Printf("[DEBUG] 开始设置用户密码")
+	client.Debug("开始设置用户密码")
 	encodedPassword := EncodePassword(password)
 	addRequest.Attribute("unicodePwd", []string{encodedPassword})
 
-	// 记录所有要添加的属性
-	log.Printf("[DEBUG] 准备添加的属性:")
-	for _, attr := range addRequest.Attributes {
-		if attr.Type == "unicodePwd" {
-			log.Printf("[DEBUG] - %s: [已加密]", attr.Type)
-		} else {
-			log.Printf("[DEBUG] - %s: %v", attr.Type, attr.Vals)
-		}
-	}
-
 	// 执行创建
-	log.Printf("[DEBUG] 开始执行Add操作")
-	updateFunc("正在创建用户...")
+	client.Debug("执行创建用户操作")
 	if err := conn.Add(addRequest); err != nil {
-		log.Printf("[ERROR] 创建用户失败: %v", err)
-		if ldapErr, ok := err.(*ldap.Error); ok {
-			log.Printf("[ERROR] LDAP错误代码: %d", ldapErr.ResultCode)
-			log.Printf("[ERROR] LDAP错误消息: %s", ldapErr.Error())
-		}
-		return fmt.Errorf("创建用户失败: %v", err)
+		return errors.New("创建用户失败: " + err.Error())
 	}
 
-	log.Printf("[DEBUG] 用户创建成功")
-	updateFunc(fmt.Sprintf("成功创建用户: %s", userDN))
+	client.Info("成功创建用户: %s (启用状态)", userDN)
+	return nil
+}
+
+// CreateOrUpdateUser 创建或更新用户
+func (client *LDAPClient) CreateOrUpdateUser(userDN string, userName string, password string, isSSL bool) error {
+	client.Debug("开始创建/更新用户：%s", userDN)
+	if isSSL {
+		// SSL模式：创建启用账号并设置密码
+		return client.CreateUserWithSSL(userDN, userName, password, client.Host, nil)
+	} else {
+		// 非SSL模式：创建禁用账号
+		return client.CreateUserWithoutSSL(userDN, userName, client.Host)
+	}
+}
+
+// MoveUserToNewLocation 移动用户到新位置
+func (client *LDAPClient) MoveUserToNewLocation(currentDN string, targetDN string) error {
+	// 确保连接有效
+	if err := client.EnsureConnection(); err != nil {
+		return errors.New("连接失败: " + err.Error())
+	}
+
+	// 确保目标路径存在
+	parentDN := strings.SplitN(targetDN, ",", 2)[1]
+	if err := client.EnsureDNExists(parentDN); err != nil {
+		return errors.New("创建目标路径失败: " + ParseLDAPError(err))
+	}
+
+	// 执行移动操作
+	if err := client.MoveUser(currentDN, targetDN); err != nil {
+		return errors.New("移动用户失败: " + ParseLDAPError(err))
+	}
+
 	return nil
 }

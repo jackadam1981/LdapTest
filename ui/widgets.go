@@ -1,8 +1,9 @@
 package ui
 
 import (
-	"fmt"
 	"strconv"
+
+	"errors"
 
 	"fyne.io/fyne/v2/widget"
 )
@@ -87,16 +88,16 @@ func (e *CustomPortEntry) SetDefaultPort(ssl bool) {
 // GetPort 获取端口号
 func (e *CustomPortEntry) GetPort() (int, error) {
 	if e.Text == "" {
-		return 0, fmt.Errorf("端口号不能为空")
+		return 0, errors.New("端口号不能为空")
 	}
 
 	port, err := strconv.Atoi(e.Text)
 	if err != nil {
-		return 0, fmt.Errorf("无效的端口号: %v", err)
+		return 0, errors.New("无效的端口号: " + err.Error())
 	}
 
 	if port < 1 || port > 65535 {
-		return 0, fmt.Errorf("端口号必须在1-65535之间")
+		return 0, errors.New("端口号必须在1-65535之间")
 	}
 
 	return port, nil

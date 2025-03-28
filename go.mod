@@ -5,7 +5,6 @@ go 1.21.4
 require (
 	fyne.io/fyne/v2 v2.5.4
 	github.com/go-ldap/ldap/v3 v3.4.10
-	golang.org/x/text v0.21.0
 )
 
 require (
@@ -41,5 +40,6 @@ require (
 	golang.org/x/mobile v0.0.0-20231127183840-76ac6878050a // indirect
 	golang.org/x/net v0.33.0 // indirect
 	golang.org/x/sys v0.28.0 // indirect
+	golang.org/x/text v0.21.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

@@ -2,8 +2,6 @@ package logger
 
 import (
 	"fmt"
-	"log"
-	"strings"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -11,125 +9,132 @@ import (
 	"fyne.io/fyne/v2/widget"
 )
 
-// 日志级别常量
+// LogLevel 定义日志级别
+type LogLevel int
+
 const (
-	LogLevelDebug = iota
-	LogLevelInfo
-	LogLevelWarn
-	LogLevelError
+	DEBUG LogLevel = iota
+	INFO
+	WARN
+	ERROR
 )
 
-// 日志级别前缀
-var logLevelPrefix = map[int]string{
-	LogLevelDebug: "[DEBUG] ",
-	LogLevelInfo:  "[INFO] ",
-	LogLevelWarn:  "[WARN] ",
-	LogLevelError: "[ERROR] ",
+// LogEntry 定义结构化日志条目
+type LogEntry struct {
+	Timestamp string
+	Level     string
+	Message   string
+	Fields    map[string]interface{}
 }
 
-// Logger 结构体用于管理日志功能
+// Logger 定义日志记录器结构
 type Logger struct {
-	debugMode    bool
-	updateStatus func(string)
+	debugMode       bool
+	statusArea      *widget.TextGrid
+	statusContainer *fyne.Container
+	updateFunc      func(string)
 }
 
-// New 创建一个新的Logger实例
-func New(debugMode bool, updateStatus func(string)) *Logger {
-	logger := &Logger{
-		debugMode:    debugMode,
-		updateStatus: updateStatus,
-	}
-
-	// 设置自定义日志输出
-	logWriter := &statusWriter{updateStatus: updateStatus, debugMode: debugMode}
-	log.SetOutput(logWriter)
-
-	// 设置日志标志
-	if debugMode {
-		log.SetFlags(log.Ltime | log.Lmicroseconds | log.Lshortfile)
-	} else {
-		// 正常模式下使用较为简单的日志格式，但不完全禁用
-		log.SetFlags(log.Ltime)
-	}
-
-	return logger
-}
-
-// Debug 输出调试级别日志
-func (l *Logger) Debug(format string, args ...interface{}) {
-	l.logMessage(LogLevelDebug, format, args...)
-}
-
-// Info 输出信息级别日志
-func (l *Logger) Info(format string, args ...interface{}) {
-	l.logMessage(LogLevelInfo, format, args...)
-}
-
-// Warn 输出警告级别日志
-func (l *Logger) Warn(format string, args ...interface{}) {
-	l.logMessage(LogLevelWarn, format, args...)
-}
-
-// Error 输出错误级别日志
-func (l *Logger) Error(format string, args ...interface{}) {
-	l.logMessage(LogLevelError, format, args...)
-}
-
-// logMessage 统一的日志记录函数
-func (l *Logger) logMessage(level int, format string, args ...interface{}) {
-	msg := fmt.Sprintf(format, args...)
-	timestamp := time.Now().Format("15:04:05.000")
-
-	// 添加日志级别前缀
-	prefix := logLevelPrefix[level]
-	formattedMsg := fmt.Sprintf("%s %s%s", timestamp, prefix, msg)
-
-	// 简略消息（没有时间戳和详细前缀）
-	simplifiedMsg := fmt.Sprintf("%s %s", prefix, msg)
-
-	// 调试模式下 - 显示所有级别的完整信息
-	if l.debugMode {
-		log.Printf(msg)
-		l.updateStatus(formattedMsg)
-		return
-	}
-
-	// 非调试模式下的处理
-	switch level {
-	case LogLevelDebug:
-		// 调试日志在非调试模式下不显示
-		return
-	case LogLevelInfo:
-		// 信息日志只显示简略信息
-		l.updateStatus(simplifiedMsg)
-	case LogLevelWarn, LogLevelError:
-		// 警告和错误级别显示完整信息，包括时间戳
-		log.Printf(msg)
-		l.updateStatus(formattedMsg)
+// New 创建新的日志记录器
+func New(debugMode bool, updateFunc func(string)) *Logger {
+	return &Logger{
+		debugMode:  debugMode,
+		updateFunc: updateFunc,
 	}
 }
 
-// 自定义日志写入器，将日志写入状态区
-type statusWriter struct {
-	updateStatus func(string)
-	debugMode    bool
-}
-
-func (w *statusWriter) Write(p []byte) (n int, err error) {
-	// 移除末尾的换行符
-	msg := strings.TrimSpace(string(p))
-	timestamp := time.Now().Format("15:04:05.000")
-
-	if w.debugMode {
-		// 调试模式下显示详细信息
-		formattedMsg := fmt.Sprintf("%s %s%s", timestamp, logLevelPrefix[LogLevelDebug], msg)
-		w.updateStatus(formattedMsg)
-	} else {
-		// 非调试模式下只更新状态区，不做额外处理
-		// 具体的日志级别控制已经在logMessage中处理
+// log 统一的日志记录方法
+func (b *BaseLogger) log(level LogLevel, format string, args ...interface{}) {
+	// 创建日志条目
+	entry := LogEntry{
+		Timestamp: time.Now().Format("2006-01-02 15:04:05"),
+		Level:     level.String(),
+		Message:   fmt.Sprintf(format, args...),
+		Fields:    make(map[string]interface{}),
 	}
 
-	return len(p), nil
+	// 构建日志消息
+	message := fmt.Sprintf("[%s] %s: %s", entry.Timestamp, entry.Level, entry.Message)
+
+	// 如果有额外字段，添加到消息中
+	if len(entry.Fields) > 0 {
+		message += " | "
+		for k, v := range entry.Fields {
+			message += fmt.Sprintf("%s=%v ", k, v)
+		}
+	}
+
+	// 更新状态区域
+	b.updateFunc(message)
+}
+
+// Debug 记录调试级别日志
+func (b *BaseLogger) Debug(format string, args ...interface{}) {
+	if b.logger.debugMode {
+		b.log(DEBUG, format, args...)
+	}
+}
+
+// Info 记录信息级别日志
+func (b *BaseLogger) Info(format string, args ...interface{}) {
+	b.log(INFO, format, args...)
+}
+
+// Warn 记录警告级别日志
+func (b *BaseLogger) Warn(format string, args ...interface{}) {
+	b.log(WARN, format, args...)
+}
+
+// Error 记录错误级别日志
+func (b *BaseLogger) Error(format string, args ...interface{}) {
+	b.log(ERROR, format, args...)
+}
+
+// String 返回日志级别的字符串表示
+func (l LogLevel) String() string {
+	switch l {
+	case DEBUG:
+		return "DEBUG"
+	case INFO:
+		return "INFO"
+	case WARN:
+		return "WARN"
+	case ERROR:
+		return "ERROR"
+	default:
+		return "UNKNOWN"
+	}
+}
+
+// WithFields 添加结构化字段到日志条目
+func (b *BaseLogger) WithFields(fields map[string]interface{}) *BaseLogger {
+	// 创建一个新的BaseLogger，继承原有功能但添加字段
+	return &BaseLogger{
+		logger: b.logger,
+		updateFunc: func(message string) {
+			entry := LogEntry{
+				Timestamp: time.Now().Format("2006-01-02 15:04:05"),
+				Level:     INFO.String(),
+				Message:   message,
+				Fields:    fields,
+			}
+			formattedMessage := fmt.Sprintf("[%s] %s: %s", entry.Timestamp, entry.Level, entry.Message)
+			if len(entry.Fields) > 0 {
+				formattedMessage += " | "
+				for k, v := range entry.Fields {
+					formattedMessage += fmt.Sprintf("%s=%v ", k, v)
+				}
+			}
+			b.updateFunc(formattedMessage)
+		},
+	}
+}
+
+// SetDebugMode 设置调试模式
+func (b *BaseLogger) SetDebugMode(debug bool) {
+	if b.logger != nil {
+		b.logger.debugMode = debug
+	}
 }
 
 // CreateStatusArea 创建状态显示区域
@@ -175,5 +180,32 @@ func CreateUpdateStatusFunc(statusArea *widget.Entry, statusContainer *container
 			statusArea.Refresh()
 			statusContainer.ScrollToTop() // 滚动到顶部
 		}()
+	}
+}
+
+// SetDebugMode 设置调试模式
+func (l *Logger) SetDebugMode(debug bool) {
+	l.debugMode = debug
+}
+
+// Loggable 定义可记录日志的接口
+type Loggable interface {
+	Debug(format string, args ...interface{})
+	Info(format string, args ...interface{})
+	Warn(format string, args ...interface{})
+	Error(format string, args ...interface{})
+}
+
+// BaseLogger 提供基础的日志功能
+type BaseLogger struct {
+	logger     *Logger
+	updateFunc func(string)
+}
+
+// NewBaseLogger 创建新的基础日志记录器
+func (l *Logger) NewBaseLogger(updateFunc func(string)) *BaseLogger {
+	return &BaseLogger{
+		logger:     l,
+		updateFunc: updateFunc,
 	}
 }
